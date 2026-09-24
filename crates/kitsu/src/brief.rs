@@ -332,8 +332,15 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
             m.id.clone(),
         )
     });
+    let mut first_note = true;
     for (m, f, why) in notes {
         let mut body = String::new();
+        if std::mem::take(&mut first_note) {
+            let _ = writeln!(
+                body,
+                "Notes are what earlier work believed, with where it came from. They can be wrong or out of date; if one disagrees with a rule above or with the code, the rule or the code wins."
+            );
+        }
         let _ = writeln!(body, "- **{}** ({}, `{}`)", m.title, m.kind.as_str(), m.id);
         if let Some(Freshness::Stale { changed, since }) = f {
             let _ = writeln!(

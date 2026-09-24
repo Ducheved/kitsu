@@ -744,6 +744,9 @@ pub fn parse_memory(id: &str, front: &str, body: &str, source: Source) -> Result
             format!("unknown memory kind `{k}` (fact, gotcha, convention, preference, lesson)")
         })?,
     };
+    if let Some(r) = &f.run {
+        valid_id(r).map_err(|e| format!("`run` must be a run id: {e}"))?;
+    }
     Ok(Memory {
         id: id.to_string(),
         title: f

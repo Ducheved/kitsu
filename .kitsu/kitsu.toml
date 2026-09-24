@@ -28,6 +28,18 @@ run = "! grep -rnE 'unbounded_channel|mpsc::channel\\(\\)' crates app/src-tauri/
 timeout = "30s"
 scope = ["crates/**", "app/src-tauri/src/**"]
 
+# Memory never reaches the code that decides status, checks, runs or accept.
+[checks.memory-no-authority]
+run = "! grep -nE '\\bmemory\\b|Memory|personal\\(' crates/kitsu/src/status.rs crates/kitsu/src/integrate.rs crates/kitsu/src/check.rs crates/kitsu/src/run.rs crates/kitsu/src/recover.rs crates/kitsu/src/store.rs"
+timeout = "30s"
+scope = ["crates/kitsu/src/**"]
+
+# Execution writes intent only where a human asked: accept-and-close, answer.
+[checks.intent-writers]
+run = "! grep -rn 'set_state(' crates/kitsu/src app/src-tauri/src | grep -vE '^crates/kitsu/src/(integrate|cli|intent)\\.rs:'"
+timeout = "30s"
+scope = ["crates/**", "app/src-tauri/src/**"]
+
 # The webview gets typed commands, never generic fs/shell/http powers.
 [checks.webview-powers]
 run = "! grep -nE 'tauri-plugin-(fs|shell|http|process)' app/src-tauri/Cargo.toml && ! grep -nE '\"(fs|shell|http|process):' app/src-tauri/capabilities/*.json"
