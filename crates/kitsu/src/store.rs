@@ -6,7 +6,7 @@
 //! write is a short transaction and WAL mode lets readers proceed while a
 //! writer commits.
 //!
-//! What is *not* here: tasks, decisions, invariants and questions (those are
+//! What is *not* here: tasks, checks, decisions and questions (those are
 //! files in the repo), and anything written only because time passed. There
 //! are no heartbeats. Liveness comes from OS file locks, see `workspace.rs`.
 

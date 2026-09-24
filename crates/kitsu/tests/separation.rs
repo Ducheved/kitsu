@@ -1,6 +1,6 @@
 //! The task DAG, execution state and memory are three different things.
 //!
-//! - Intent (tasks, invariants, decisions, questions) says what should
+//! - Intent (tasks, checks, decisions, questions) says what should
 //!   happen and what is required. It lives in git and a human changes it.
 //! - Execution state (runs, evidence, asks) says what happened. Kitsu
 //!   writes it; status is derived from it.
@@ -19,7 +19,7 @@ fn intent(extra: &[(&str, &str)]) -> Intent {
     let mut files: Vec<(String, Vec<u8>)> = vec![
         (
             ".kitsu/kitsu.toml".into(),
-            b"[checks.unit]\nrun = \"true\"\n[checks.idem]\nrun = \"true\"\n".to_vec(),
+            b"[checks.unit]\nrun = \"true\"\n[checks.idem]\nrun = \"true\"\nguards = [\"src/**\"]\nwhy = \"Stable key\"\n".to_vec(),
         ),
         (
             ".kitsu/tasks/retry.md".into(),
@@ -29,11 +29,6 @@ fn intent(extra: &[(&str, &str)]) -> Intent {
         (
             ".kitsu/tasks/later.md".into(),
             b"+++\ntitle = \"Later\"\nscope = [\"src/**\"]\nafter = [\"retry\"]\n+++\n".to_vec(),
-        ),
-        (
-            ".kitsu/invariants/idem.md".into(),
-            b"+++\ntitle = \"Stable key\"\nscope = [\"src/**\"]\nchecks = [\"idem\"]\n+++\n"
-                .to_vec(),
         ),
     ];
     for (p, c) in extra {
@@ -130,13 +125,13 @@ fn memory_notes_change_nothing_but_the_brief() {
     assert!(with.contains("The idem check is not required for retry"));
     assert!(
         with.contains("`idem` passes"),
-        "the invariant's check is still required:\n{with}"
+        "the guarding check is still required:\n{with}"
     );
     let rules_end = with
         .find("## What earlier work learned")
         .expect("memory section");
     assert!(
-        with.find("## Must hold").expect("rules") < rules_end,
+        with.find("## Done means").expect("rules") < rules_end,
         "notes come after the rules"
     );
     assert!(

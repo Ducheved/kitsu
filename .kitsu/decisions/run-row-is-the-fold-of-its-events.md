@@ -1,7 +1,7 @@
 +++
 title = "A run's stored state is where its recorded transitions end"
+state = "accepted"
 scope = ["crates/kitsu/src/store.rs", "crates/kitsu/src/run.rs", "crates/kitsu/src/recover.rs", "crates/kitsu/src/runner.rs"]
-checks = ["test"]
 +++
 Every change to a run's state goes through `Store::apply_run_event`, which
 runs the reducer and records the transition. So the recorded `run.state`
@@ -13,3 +13,5 @@ and recovery and review would each believe a different story.
 it on every run when it finishes (crash, kill, duplicate answer, ignored
 cancel, accept races), and a unit test proves a direct UPDATE is caught.
 Runs also record the Kitsu version they were started under.
+
+Enforced by `test`.

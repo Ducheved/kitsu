@@ -206,7 +206,6 @@ pub async fn overview(state: State<'_, AppState>) -> R<Value> {
             .chain(personal.problems.iter().map(|(p, d)| json!({ "path": p, "detail": d })))
             .collect();
         let counts = json!({
-            "invariants": intent.invariants.len(),
             "decisions": intent.decisions.len(),
             "open_questions": intent.questions.values().filter(|q| q.state == QuestionState::Open).count(),
             "memory": intent.memory.len(),
@@ -527,23 +526,6 @@ pub async fn rules(state: State<'_, AppState>) -> R<Value> {
         let intent = Intent::load_dir(&w.root)?;
         let git = w.git();
         let tree = git.worktree_tree(&w.scratch())?;
-        let check_status = |names: &[String]| -> R<Vec<Value>> {
-            let mut out = Vec::new();
-            for n in names {
-                match intent.config.checks.get(n) {
-                    Some(def) => out.push(json!({ "name": n, "status": status_at(&git, &store, def, &tree)? })),
-                    None => out.push(json!({ "name": n, "status": { "status": "missing" } })),
-                }
-            }
-            Ok(out)
-        };
-        let mut invariants = Vec::new();
-        for i in intent.invariants.values() {
-            invariants.push(json!({
-                "id": i.id, "title": i.title, "active": i.state == intent::InvariantState::Active, "scope": i.scope.globs(),
-                "checks": check_status(&i.checks)?, "decision": i.decision, "body": i.body, "path": i.source.path
-            }));
-        }
         let decisions: Vec<Value> = intent
             .decisions
             .values()
@@ -565,7 +547,7 @@ pub async fn rules(state: State<'_, AppState>) -> R<Value> {
             .config
             .checks
             .values()
-            .map(|c| -> R<Value> { Ok(json!({ "name": c.name, "run": c.run, "scope": c.scope.globs(), "status": status_at(&git, &store, c, &tree)? })) })
+            .map(|c| -> R<Value> { Ok(json!({ "name": c.name, "run": c.run, "scope": c.scope.globs(), "guards": c.guards.globs(), "why": c.why, "status": status_at(&git, &store, c, &tree)? })) })
             .collect::<R<_>>()?;
         // Staleness against HEAD: uncommitted edits to anchors don't count
         // until committed, same as for runs.
@@ -587,7 +569,7 @@ pub async fn rules(state: State<'_, AppState>) -> R<Value> {
                         "superseded_by": superseded.get(&m.id), "reason": m.reason, "key": m.key })
             })
             .collect();
-        Ok(json!({ "invariants": invariants, "decisions": decisions, "questions": questions, "memory": memory, "checks": checks }))
+        Ok(json!({ "decisions": decisions, "questions": questions, "memory": memory, "checks": checks }))
     })
     .await
 }

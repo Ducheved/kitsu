@@ -19,7 +19,7 @@ use serde::Serialize;
 use crate::check::{CheckStatus, status_at};
 use crate::error::Result;
 use crate::git::Git;
-use crate::intent::{CheckDef, Intent, InvariantState, Task, TaskState};
+use crate::intent::{CheckDef, Intent, Task, TaskState};
 use crate::run::RunState;
 use crate::scope::Scope;
 use crate::store::{RunRow, Store};
@@ -114,16 +114,16 @@ pub struct TaskView {
 pub struct RequiredCheck {
     pub name: String,
     /// Why this check is required, e.g. "task acceptance" or
-    /// "invariant idempotency-key (src/client/**)".
+    /// "guards src/client/**".
     pub why: Vec<String>,
 }
 
 /// The checks that decide whether a change for `task` is acceptable:
 /// the task's own acceptance checks, plus the checks of every active
-/// invariant whose scope the change touches.
+/// check whose `guards` the change touches.
 ///
 /// `changed` is the list of paths the change actually modified, when known.
-/// Before any change exists, invariants are matched against the task's
+/// Before any change exists, guards are matched against the task's
 /// declared scope instead (conservatively, see `Scope::may_overlap`).
 pub fn required_checks(
     intent: &Intent,
@@ -136,24 +136,23 @@ pub fn required_checks(
             .or_default()
             .push("task acceptance".into());
     }
-    for inv in intent
-        .invariants
+    for check in intent
+        .config
+        .checks
         .values()
-        .filter(|i| i.state == InvariantState::Active)
+        .filter(|c| !c.guards.is_everything())
     {
         let hit = match changed {
             Some(paths) => {
-                inv.scope.touches_any(paths.iter().map(String::as_str))
-                    || inv.scope.may_overlap(&task.scope)
+                check.guards.touches_any(paths.iter().map(String::as_str))
+                    || check.guards.may_overlap(&task.scope)
             }
-            None => inv.scope.may_overlap(&task.scope),
+            None => check.guards.may_overlap(&task.scope),
         };
         if hit {
-            for c in &inv.checks {
-                out.entry(c.clone())
-                    .or_default()
-                    .push(format!("invariant {}", inv.id));
-            }
+            out.entry(check.name.clone())
+                .or_default()
+                .push(format!("guards {}", check.guards.globs().join(", ")));
         }
     }
     out.into_iter()
@@ -443,34 +442,23 @@ mod tests {
         )
     }
 
-    const CFG: &str = "[checks.unit]\nrun = \"true\"\n[checks.idem]\nrun = \"true\"\n[checks.docs]\nrun = \"true\"\n";
+    const CFG: &str = "[checks.unit]\nrun = \"true\"\n[checks.idem]\nrun = \"true\"\nguards = [\"src/client/**\"]\n[checks.docs]\nrun = \"true\"\nguards = [\"docs/**\"]\n[checks.lint]\nrun = \"true\"\n";
 
     #[test]
-    fn required_checks_follow_invariant_scope() {
+    fn required_checks_follow_guards() {
         let i = intent(&[
             (".kitsu/kitsu.toml", CFG),
             (
                 ".kitsu/tasks/t.md",
                 "+++\nscope = [\"src/client/**\"]\nchecks = [\"unit\"]\n+++\n",
             ),
-            (
-                ".kitsu/invariants/idem.md",
-                "+++\nscope = [\"src/client/**\"]\nchecks = [\"idem\"]\n+++\n",
-            ),
-            (
-                ".kitsu/invariants/docs.md",
-                "+++\nscope = [\"docs/**\"]\nchecks = [\"docs\"]\n+++\n",
-            ),
-            (
-                ".kitsu/invariants/old.md",
-                "+++\nstate = \"retired\"\nchecks = [\"docs\"]\n+++\n",
-            ),
         ]);
         assert!(i.problems.is_empty(), "{:?}", i.problems);
         let t = &i.tasks["t"];
         let names = |v: Vec<RequiredCheck>| v.into_iter().map(|r| r.name).collect::<Vec<_>>();
         assert_eq!(names(required_checks(&i, t, None)), ["idem", "unit"]);
-        // The change strayed into docs/: the docs invariant now applies.
+        // The change strayed into docs/: the docs check now applies. `lint`
+        // guards nothing, so only a task naming it would require it.
         let changed = vec!["src/client/a.rs".to_string(), "docs/x.md".to_string()];
         assert_eq!(
             names(required_checks(&i, t, Some(&changed))),
@@ -495,13 +483,13 @@ mod tests {
     fn protected_paths_include_intent_itself() {
         let i = intent(&[(".kitsu/kitsu.toml", "[protect]\npaths = [\"tests/**\"]\n")]);
         let changed = vec![
-            ".kitsu/invariants/x.md".to_string(),
+            ".kitsu/decisions/x.md".to_string(),
             "tests/t.rs".to_string(),
             "src/a.rs".to_string(),
         ];
         assert_eq!(
             protected_changes(&i, &changed),
-            [".kitsu/invariants/x.md", "tests/t.rs"]
+            [".kitsu/decisions/x.md", "tests/t.rs"]
         );
     }
 }

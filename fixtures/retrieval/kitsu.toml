@@ -143,7 +143,7 @@ expect = ["crates/kitsu/src/bin/test_agent.rs"]
 [[q]]
 kind = "words"
 query = "a queue without a bound is an out of memory waiting to happen"
-expect = [".kitsu/invariants/bounded-queues.md", ".kitsu/kitsu.toml"]
+expect = [".kitsu/decisions/bounded-queues.md", ".kitsu/kitsu.toml"]
 
 [[q]]
 kind = "name"

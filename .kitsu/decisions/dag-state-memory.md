@@ -11,7 +11,7 @@ rejected = [
 +++
 Three things, kept apart:
 
-- **Intent** (`.kitsu/tasks`, invariants, decisions, questions) says what
+- **Intent** (`.kitsu/tasks`, checks, decisions, questions) says what
   should happen and what is required. Written by people, or proposed by
   agents and accepted through review.
 - **Execution state** (`state.db`: runs, events, evidence, asks) says what
@@ -27,8 +27,9 @@ only; memory → brief, labeled as possibly wrong; execution → memory only
 as a proposed file. Advisory inputs (memory, judgments, retrieval) may add
 a requirement or a warning, never remove one.
 
-Enforced by invariants `memory-has-no-authority`,
-`task-files-hold-intent-only` and `run-row-is-the-fold-of-its-events`.
+Written down as the decisions `memory-has-no-authority`,
+`task-files-hold-intent-only` and `run-row-is-the-fold-of-its-events`;
+enforced by the checks `memory-no-authority`, `intent-writers` and `test`.
 
 A "Dreamer" (background consolidation) is allowed only as an ordinary run
 that proposes a diff under `.kitsu/memory/` and `.kitsu/questions/`,

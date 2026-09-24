@@ -7,7 +7,7 @@
 //!
 //! Two questions get asked of scopes:
 //! - does a concrete path fall inside? (exact, used against diffs)
-//! - can two scopes overlap? (conservative, used to pull invariants into a
+//! - can two scopes overlap? (conservative, used to pull guarding checks into a
 //!   task brief before any file has changed)
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

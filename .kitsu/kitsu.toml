@@ -15,6 +15,14 @@ scope = ["crates/**", "app/src-tauri/**", "Cargo.toml", "Cargo.lock"]
 run = "cargo test --workspace"
 timeout = "15m"
 scope = ["crates/**", "app/src-tauri/**", "fixtures/**", "Cargo.toml", "Cargo.lock"]
+guards = ["crates/**", "app/src-tauri/**", "fixtures/**", "Cargo.toml", "Cargo.lock"]
+why = """
+The suite holds the properties the design rests on: agents never write your
+checkout, one live owner per run, a run row is the fold of its events,
+status is derived, a change is judged by your rules and not the ones it
+brings, missing evidence is never "passing". Each is a decision with the
+same name in .kitsu/decisions/.
+"""
 
 [checks.ui]
 run = "cd app && npm run check && npm test && npm run build"
@@ -27,24 +35,32 @@ scope = ["app/src/**", "app/tests/**", "app/package.json", "app/package-lock.jso
 run = "! grep -rnE 'unbounded_channel|mpsc::channel\\(\\)' crates app/src-tauri/src"
 timeout = "30s"
 scope = ["crates/**", "app/src-tauri/src/**"]
+guards = ["crates/**", "app/src-tauri/src/**"]
+why = "Every queue has a bound: backpressure makes the producer wait, memory doesn't grow."
 
 # Memory never reaches the code that decides status, checks, runs or accept.
 [checks.memory-no-authority]
 run = "! grep -nE '\\bmemory\\b|Memory|personal\\(' crates/kitsu/src/status.rs crates/kitsu/src/integrate.rs crates/kitsu/src/check.rs crates/kitsu/src/run.rs crates/kitsu/src/recover.rs crates/kitsu/src/store.rs"
 timeout = "30s"
 scope = ["crates/kitsu/src/**"]
+guards = ["crates/kitsu/src/status.rs", "crates/kitsu/src/integrate.rs", "crates/kitsu/src/check.rs", "crates/kitsu/src/run.rs", "crates/kitsu/src/recover.rs", "crates/kitsu/src/store.rs", "crates/kitsu/src/memory.rs", "crates/kitsu/src/intent.rs"]
+why = "Memory changes what an agent is told, never what is required, ready, allowed or done."
 
 # Execution writes intent only where a human asked: accept-and-close, answer.
 [checks.intent-writers]
 run = "! grep -rn 'set_state(' crates/kitsu/src app/src-tauri/src | grep -vE '^crates/kitsu/src/(integrate|cli|intent)\\.rs:'"
 timeout = "30s"
 scope = ["crates/**", "app/src-tauri/src/**"]
+guards = ["crates/**", "app/src-tauri/src/**"]
+why = "A task file says what should happen, never what happened: only accept-and-close and answer write it."
 
 # The webview gets typed commands, never generic fs/shell/http powers.
 [checks.webview-powers]
 run = "! grep -nE 'tauri-plugin-(fs|shell|http|process)' app/src-tauri/Cargo.toml && ! grep -nE '\"(fs|shell|http|process):' app/src-tauri/capabilities/*.json"
 timeout = "30s"
 scope = ["app/src-tauri/Cargo.toml", "app/src-tauri/capabilities/**"]
+guards = ["app/src-tauri/**"]
+why = "The window can't read, write or run arbitrary things: typed commands only."
 
 [protect]
 paths = ["crates/kitsu/tests/**", "fixtures/**", "app/src-tauri/capabilities/**", "app/src-tauri/tauri.conf.json"]
@@ -58,3 +74,5 @@ cover = ["crates/kitsu/src/*.rs", "crates/kitsu/src/bin/*.rs", "app/src-tauri/sr
 run = "cargo run -q -p kitsu --bin kitsu -- arch check"
 timeout = "10m"
 scope = ["crates/kitsu/src/**", "app/src-tauri/src/**", ".kitsu/architecture/**", ".kitsu/kitsu.toml", "docs/**"]
+guards = ["crates/kitsu/src/**", "app/src-tauri/src/**", ".kitsu/architecture/**", "docs/**"]
+why = "Every module belongs to exactly one component in .kitsu/architecture/; a new module comes with its component."

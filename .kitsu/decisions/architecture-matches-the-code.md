@@ -1,7 +1,7 @@
 +++
 title = "The architecture model matches the code"
+state = "accepted"
 scope = ["crates/kitsu/src/**", "app/src-tauri/src/**", ".kitsu/architecture/**", "docs/**"]
-checks = ["architecture"]
 +++
 Every module in `[architecture] cover` belongs to exactly one component in
 `.kitsu/architecture/`, every path a component claims exists, and every
@@ -15,3 +15,5 @@ from the code a few commits earlier, already missed `index.rs` and
 The check can't tell whether the prose is still true. It keeps the claims
 the prose rests on honest, and a component whose files changed shape is
 the place to re-read it.
+
+Enforced by `architecture`.

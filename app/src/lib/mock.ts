@@ -242,7 +242,7 @@ const handlers: Record<string, (a: Record<string, unknown>) => unknown> = {
       { name: "test", command: "kitsu-test-agent", source: "bundled" },
     ],
     problems: [],
-    counts: { invariants: 2, decisions: 1, memory: 3, open_questions: questions.filter((q) => q.open).length, checks: 3 },
+    counts: { decisions: 2, memory: 3, open_questions: questions.filter((q) => q.open).length, checks: 3 },
   }),
   mark_seen: (a) => {
     seen = a.seq as number;
@@ -259,8 +259,7 @@ const handlers: Record<string, (a: Record<string, unknown>) => unknown> = {
             ? [{ kind: "task", id: t.id, title: t.title, path: `.kitsu/tasks/${t.id}.md`, content_id: "a1", why: "the task" }]
             : [
                 { kind: "task", id: t.id, title: t.title, path: `.kitsu/tasks/${t.id}.md`, content_id: "a1", why: "the task" },
-                { kind: "invariant", id: "one-key-per-charge", title: "One idempotency key per logical charge, reused by every retry", path: ".kitsu/invariants/one-key-per-charge.md", content_id: "b2", why: "task scope payments.py overlaps payments.py" },
-                { kind: "decision", id: "retry-budget", title: "Retry charges at most 3 times, only with an idempotency key", path: ".kitsu/decisions/retry-budget.md", content_id: "c3", why: "linked from an invariant in scope" },
+                { kind: "decision", id: "retry-budget", title: "Retry charges at most 3 times, only with an idempotency key", path: ".kitsu/decisions/retry-budget.md", content_id: "c3", why: "task scope payments.py overlaps payments.py" },
               ],
         omitted: [],
         problems: [],
@@ -369,11 +368,8 @@ const handlers: Record<string, (a: Record<string, unknown>) => unknown> = {
     return { id, path: `.kitsu/tasks/${id}.md` };
   },
   rules: (): Rules => ({
-    invariants: [
-      { id: "one-key-per-charge", title: "One idempotency key per logical charge, reused by every retry", active: true, scope: ["payments.py"], checks: [{ name: "idempotency", status: checkStatus("idempotency") }], decision: "retry-budget", body: "The upstream can charge the card and then lose the response. The only thing that makes a retry safe is sending the same `idempotency_key` again.", path: ".kitsu/invariants/one-key-per-charge.md" },
-      { id: "no-secrets-in-logs", title: "Card numbers never reach the logs", active: true, scope: [], checks: [], decision: null, body: "Reviewed by hand. There is no check for this yet.", path: ".kitsu/invariants/no-secrets-in-logs.md" },
-    ],
     decisions: [
+      { id: "one-key-per-charge", title: "One idempotency key per logical charge, reused by every retry", state: "accepted", scope: ["payments.py"], rejected: [], body: "The upstream can charge the card and then lose the response. The only thing that makes a retry safe is sending the same `idempotency_key` again.", path: ".kitsu/decisions/one-key-per-charge.md" },
       { id: "retry-budget", title: "Retry charges at most 3 times, only with an idempotency key", state: "accepted", scope: ["payments.py"], rejected: ["Infinite retry: turns an upstream brownout into our outage", "Circuit breaker for now: one caller, no evidence of long outages", "Retrying without a key: a lost response becomes a second charge"], body: "Three attempts total, with jittered backoff between them.", path: ".kitsu/decisions/retry-budget.md" },
     ],
     questions: questions.map((q) => ({ ...q, path: `.kitsu/questions/${q.id}.md` })),
@@ -383,15 +379,15 @@ const handlers: Record<string, (a: Record<string, unknown>) => unknown> = {
       { id: "personal/small-commits", title: "Small commits, one idea each", kind: "preference", scope: [], anchors: [], by: null, run: null, body: "", path: "~/.config/kitsu/memory/small-commits.md", freshness: { status: "unanchored" }, personal: true, state: "current", superseded_by: null, reason: null, key: null },
     ],
     checks: [
-      { name: "retries", run: "python3 -m unittest -q test_retries", scope: [], status: { status: "stale", outcome: "fail", evidence: 1, changed: ["payments.py"], more: 0 } },
-      { name: "idempotency", run: "python3 -m unittest -q test_idempotency", scope: ["payments.py"], status: { status: "stale", outcome: "fail", evidence: 2, changed: ["payments.py"], more: 0 } },
-      { name: "refunds", run: "python3 -m unittest -q test_refunds", scope: [], status: { status: "unverified" } },
+      { name: "retries", run: "python3 -m unittest -q test_retries", scope: [], guards: [], why: null, status: { status: "stale", outcome: "fail", evidence: 1, changed: ["payments.py"], more: 0 } },
+      { name: "idempotency", run: "python3 -m unittest -q test_idempotency", scope: ["payments.py"], guards: ["payments.py"], why: "One idempotency key per logical charge, reused by every retry", status: { status: "stale", outcome: "fail", evidence: 2, changed: ["payments.py"], more: 0 } },
+      { name: "refunds", run: "python3 -m unittest -q test_refunds", scope: [], guards: [], why: null, status: { status: "unverified" } },
     ],
   }),
   run_checks: () => [],
   read_file: (a) => ({ path: a.path, text: (handlers.file_diff!(a) as { new: string }).new, version: "v1" }),
   write_file: () => "v2",
-  list_files: () => ["payments.py", "fake_upstream.py", "test_idempotency.py", "test_retries.py", "metrics.py", ".kitsu/kitsu.toml", ".kitsu/tasks/bounded-retries.md", ".kitsu/invariants/one-key-per-charge.md", ".kitsu/decisions/retry-budget.md"],
+  list_files: () => ["payments.py", "fake_upstream.py", "test_idempotency.py", "test_retries.py", "metrics.py", ".kitsu/kitsu.toml", ".kitsu/tasks/bounded-retries.md", ".kitsu/decisions/one-key-per-charge.md", ".kitsu/decisions/retry-budget.md"],
 };
 
 export async function invoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {

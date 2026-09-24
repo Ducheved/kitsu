@@ -40,9 +40,9 @@ head.
             fast-forward only if your branch didn't move
 ```
 
-- **Rules are files in your repo.** Tasks, invariants, decisions (with the
-  alternatives you rejected) and open questions are small Markdown files in
-  `.kitsu/`. They're versioned, branched and reviewed with the code, and
+- **Rules are files in your repo.** Tasks, decisions (with the alternatives
+  you rejected) and open questions are small Markdown files in `.kitsu/`;
+  checks and the paths each one guards are in `.kitsu/kitsu.toml`. They're versioned, branched and reviewed with the code, and
   readable without Kitsu.
 - **Every run gets a fresh brief.** It's compiled from the rules whose scope
   overlaps the task, with the reason each one is included, plus what earlier
@@ -54,7 +54,7 @@ head.
   it ran on. Edit a file the check covers and it goes stale, and it tells you
   which file.
 - **You're judged by your rules, not the agent's.** If a change edits a test
-  or an invariant, you see it as a rule change and have to approve that
+  or a check, you see it as a rule change and have to approve that
   exact diff.
 - **Nothing lies after a crash.** Kill anything at any point. Interrupted runs
   stay interrupted with their partial work kept, orphaned agents get stopped,
@@ -80,7 +80,7 @@ kitsu brief bounded-retries        # what an agent would be told
 # An agent that bounds the retries but makes a new key per attempt:
 KITSU_TEST_SCRIPT=$AGENTS/naive.toml kitsu run bounded-retries --agent test
 kitsu status                       # ready for review, failing: idempotency
-kitsu accept <run>                 # refused: the invariant's check fails
+kitsu accept <run>                 # refused: the check guarding payments.py fails
 
 # One that gets it right:
 KITSU_TEST_SCRIPT=$AGENTS/good.toml kitsu run bounded-retries --agent test
@@ -131,26 +131,22 @@ says so in the corner.
 ## What's in `.kitsu/`
 
 ```
-.kitsu/kitsu.toml                  checks and protected paths
+.kitsu/kitsu.toml                  checks, what each guards, protected paths
 .kitsu/tasks/bounded-retries.md    what to do, scope, which checks mean done
-.kitsu/invariants/one-key-per-charge.md
 .kitsu/decisions/retry-budget.md   the choice, and what was rejected and why
 .kitsu/questions/*.md              open unknowns; they block tasks
 ```
 
-```markdown
-+++
-title = "One idempotency key per logical charge, reused by every retry"
-scope = ["payments.py"]
-checks = ["idempotency"]
-decision = "retry-budget"
-+++
-The upstream can charge the card and then lose the response. The only thing
-that makes a retry safe is sending the same key again...
+```toml
+[checks.idempotency]
+run = "python3 -m unittest -q test_idempotency"
+scope = ["payments.py", "fake_upstream.py", "test_idempotency.py"]  # evidence goes stale when these change
+guards = ["payments.py"]                                            # any change here needs it to pass
+why = "One idempotency key per logical charge, reused by every retry."
 ```
 
 This repository uses Kitsu on itself; see [`.kitsu/`](.kitsu) for its own
-invariants, decisions and what's next.
+checks, decisions and what's next.
 
 ## CLI
 
@@ -158,7 +154,7 @@ invariants, decisions and what's next.
 |---|---|
 | `kitsu status` | what needs you, what's running, what's ready |
 | `kitsu next` | tasks that can start now, in dependency order |
-| `kitsu new task "..."` | also `decision`, `invariant`, `question` |
+| `kitsu new task "..."` | also `decision`, `question`, `memory`, `element` |
 | `kitsu brief <task>` | the brief an agent would get |
 | `kitsu check [names]` | run checks, record evidence |
 | `kitsu run <task> --agent X` | start an agent in its own worktree |

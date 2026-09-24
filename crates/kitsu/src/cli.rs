@@ -25,7 +25,7 @@ use crate::util::{ago, now_ms, slugify};
 use crate::workspace::{Instance, Liveness, Workspace};
 
 #[derive(Parser)]
-#[command(name = "kitsu", version, about = "Tasks, invariants and evidence for humans and coding agents.", long_about = None)]
+#[command(name = "kitsu", version, about = "Tasks, checks and evidence for humans and coding agents.", long_about = None)]
 struct Cli {
     /// Print machine-readable JSON instead of text.
     #[arg(long, global = true)]
@@ -47,9 +47,9 @@ enum Cmd {
     Status,
     /// Tasks that can start right now, in dependency order.
     Next,
-    /// Create a task, decision, invariant or question.
+    /// Create a task, decision, question, memory note or architecture element.
     New {
-        /// task | decision | invariant | question | element
+        /// task | decision | question | memory | element
         kind: String,
         title: String,
         #[arg(long, value_delimiter = ',')]
@@ -66,7 +66,7 @@ enum Cmd {
         #[arg(long)]
         id: Option<String>,
     },
-    /// Show a task, decision, invariant, question or run.
+    /// Show a task, decision, question or run.
     Show { id: String },
     /// Print the brief an agent would get for a task. Inside a run's
     /// worktree with no task, prints the brief that run was given.
@@ -488,7 +488,7 @@ fn new(
 ) -> Result<()> {
     let kind = Kind::parse(kind).ok_or_else(|| {
         Error::Invalid(format!(
-            "unknown kind `{kind}` (task, decision, invariant, question, memory)"
+            "unknown kind `{kind}` (task, decision, question, memory, element)"
         ))
     })?;
     let text = render_new(kind, title, &scope, &checks, &after, &blocks);
@@ -524,11 +524,6 @@ pub fn render_new(
                 front.push_str(&format!("after = {}\n", list(after)));
             }
         }
-        Kind::Invariant => front.push_str(&format!(
-            "scope = {}\nchecks = {}\n",
-            list(scope),
-            list(checks)
-        )),
         Kind::Decision => front.push_str(&format!(
             "state = \"accepted\"\nscope = {}\nrejected = []\n",
             list(scope)
@@ -546,7 +541,6 @@ pub fn render_new(
     }
     let body = match kind {
         Kind::Task => "What should be true when this is done, and why.\n",
-        Kind::Invariant => "Why this must hold, and what breaks if it doesn't.\n",
         Kind::Decision => "Context, the choice, and what it costs.\n",
         Kind::Question => "What we need to know and what depends on it.\n",
         Kind::Memory => "What the next person or agent should know, and how you know it.\n",
@@ -694,7 +688,7 @@ fn show(ws: &Workspace, id: &str, json: bool) -> Result<()> {
         } else {
             println!("{} {}", paint(kind.name(), DIM), paint(&source.path, DIM));
             print!("{text}");
-            if *kind == Kind::Task || *kind == Kind::Invariant {
+            if *kind == Kind::Task {
                 show_checks(ws, &intent, id, *kind)?;
             }
         }
@@ -798,8 +792,10 @@ fn show(ws: &Workspace, id: &str, json: bool) -> Result<()> {
 
 fn show_checks(ws: &Workspace, intent: &Intent, id: &str, kind: Kind) -> Result<()> {
     let names: Vec<String> = match kind {
-        Kind::Task => intent.tasks[id].checks.clone(),
-        Kind::Invariant => intent.invariants[id].checks.clone(),
+        Kind::Task => crate::status::required_checks(intent, &intent.tasks[id], None)
+            .into_iter()
+            .map(|r| r.name)
+            .collect(),
         _ => Vec::new(),
     };
     if names.is_empty() {

@@ -1,6 +1,7 @@
 //! Intent: the part of engineering state that people review.
 //!
-//! Tasks, decisions, invariants and open questions live as Markdown files
+//! Tasks, decisions, open questions, memory notes and the architecture
+//! model live as Markdown files
 //! with TOML front matter under `.kitsu/` in the repository. That makes git
 //! their authority: they branch, merge, conflict and get reviewed with the
 //! code they talk about, and they stay readable if Kitsu goes away.
@@ -24,17 +25,15 @@ pub const CONFIG: &str = ".kitsu/kitsu.toml";
 pub enum Kind {
     Task,
     Decision,
-    Invariant,
     Question,
     Memory,
     Architecture,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 6] = [
+    pub const ALL: [Kind; 5] = [
         Kind::Task,
         Kind::Decision,
-        Kind::Invariant,
         Kind::Question,
         Kind::Memory,
         Kind::Architecture,
@@ -44,7 +43,6 @@ impl Kind {
         match self {
             Kind::Task => "tasks",
             Kind::Decision => "decisions",
-            Kind::Invariant => "invariants",
             Kind::Question => "questions",
             Kind::Memory => "memory",
             Kind::Architecture => "architecture",
@@ -55,7 +53,6 @@ impl Kind {
         match self {
             Kind::Task => "task",
             Kind::Decision => "decision",
-            Kind::Invariant => "invariant",
             Kind::Question => "question",
             Kind::Memory => "memory",
             Kind::Architecture => "element",
@@ -89,6 +86,12 @@ pub struct CheckDef {
     /// Evidence stays fresh while changes stay outside this scope.
     /// Empty means any change makes it stale.
     pub scope: Scope,
+    /// A change that touches these paths needs this check to pass, whatever
+    /// its task says. Empty: required only by tasks that name it.
+    pub guards: Scope,
+    /// What the check protects, in words. Goes into the brief of every task
+    /// it guards.
+    pub why: Option<String>,
 }
 
 impl CheckDef {
@@ -286,24 +289,6 @@ pub enum MemoryState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InvariantState {
-    Active,
-    Retired,
-}
-
-#[derive(Debug, Clone)]
-pub struct Invariant {
-    pub id: String,
-    pub title: String,
-    pub state: InvariantState,
-    pub scope: Scope,
-    pub checks: Vec<String>,
-    pub decision: Option<String>,
-    pub body: String,
-    pub source: Source,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionState {
     Open,
     Answered,
@@ -321,7 +306,7 @@ pub struct Question {
 }
 
 /// A file Kitsu could not use. Problems are never dropped on the floor: a
-/// broken invariant file means a constraint is missing, and the brief and the
+/// broken rule file means a constraint is missing, and the brief and the
 /// status view both say so.
 #[derive(Debug, Clone)]
 pub struct Problem {
@@ -334,7 +319,6 @@ pub struct Intent {
     pub config: Config,
     pub tasks: BTreeMap<String, Task>,
     pub decisions: BTreeMap<String, Decision>,
-    pub invariants: BTreeMap<String, Invariant>,
     pub questions: BTreeMap<String, Question>,
     pub memory: BTreeMap<String, Memory>,
     pub architecture: BTreeMap<String, Element>,
@@ -355,8 +339,9 @@ impl Intent {
                 std::fs::read(&config).map_err(|e| Error::io(config.display().to_string(), e))?;
             files.push((CONFIG.to_string(), bytes));
         }
-        for kind in Kind::ALL {
-            let dir = base.join(kind.dir());
+        // `invariants` is read only so a leftover file is reported.
+        for sub in Kind::ALL.iter().map(|k| k.dir()).chain(["invariants"]) {
+            let dir = base.join(sub);
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
@@ -370,7 +355,7 @@ impl Intent {
                 }
                 let bytes = std::fs::read(entry.path())
                     .map_err(|e| Error::io(entry.path().display().to_string(), e))?;
-                files.push((format!("{DIR}/{}/{name}", kind.dir()), bytes));
+                files.push((format!("{DIR}/{sub}/{name}"), bytes));
             }
         }
         Ok(Intent::from_files(files))
@@ -398,6 +383,10 @@ impl Intent {
                     Ok(c) => intent.config = c,
                     Err(e) => intent.problem(&path, e),
                 }
+                continue;
+            }
+            if is_retired_invariant(&path) {
+                intent.problem(&path, RETIRED_INVARIANTS);
                 continue;
             }
             let Some((kind, id)) = classify(&path) else {
@@ -476,32 +465,6 @@ impl Intent {
                         scope: Scope::new(f.scope),
                         rejected: f.rejected,
                         supersedes: f.supersedes,
-                        body: body.to_string(),
-                        source,
-                    },
-                );
-            }
-            Kind::Invariant => {
-                let f: InvariantFront = toml::from_str(front).map_err(|e| toml_msg(&e))?;
-                let state = match f.state.as_deref().unwrap_or("active") {
-                    "active" => InvariantState::Active,
-                    "retired" => InvariantState::Retired,
-                    other => {
-                        return Err(format!(
-                            "unknown invariant state `{other}` (active, retired)"
-                        ));
-                    }
-                };
-                let title = f.title.unwrap_or_else(title_fallback);
-                self.invariants.insert(
-                    id.clone(),
-                    Invariant {
-                        id,
-                        title,
-                        state,
-                        scope: Scope::new(f.scope),
-                        checks: f.checks,
-                        decision: f.decision,
                         body: body.to_string(),
                         source,
                     },
@@ -610,18 +573,6 @@ impl Intent {
                         format!("`after` names unknown task `{a}`"),
                     ));
                 }
-            }
-        }
-        for i in self.invariants.values() {
-            for c in &i.checks {
-                if !self.config.checks.contains_key(c) {
-                    found.push((i.source.path.clone(), format!("unknown check `{c}`")));
-                }
-            }
-            if let Some(d) = &i.decision
-                && !self.decisions.contains_key(d)
-            {
-                found.push((i.source.path.clone(), format!("unknown decision `{d}`")));
             }
         }
         for q in self.questions.values() {
@@ -760,9 +711,6 @@ impl Intent {
         if let Some(d) = self.decisions.get(id) {
             out.push((Kind::Decision, &d.source));
         }
-        if let Some(i) = self.invariants.get(id) {
-            out.push((Kind::Invariant, &i.source));
-        }
         if let Some(q) = self.questions.get(id) {
             out.push((Kind::Question, &q.source));
         }
@@ -806,7 +754,6 @@ impl Intent {
         match kind {
             Kind::Task => self.tasks.keys().cloned().collect(),
             Kind::Decision => self.decisions.keys().cloned().collect(),
-            Kind::Invariant => self.invariants.keys().cloned().collect(),
             Kind::Question => self.questions.keys().cloned().collect(),
             Kind::Memory => self.memory.keys().cloned().collect(),
             Kind::Architecture => self.architecture.keys().cloned().collect(),
@@ -820,6 +767,16 @@ impl Intent {
 /// through.
 pub fn is_memory_note(path: &str) -> bool {
     matches!(classify(path), Some((Kind::Memory, _)))
+}
+
+/// `.kitsu/invariants/` is gone. A file still there is a rule that no
+/// longer binds, so it is reported instead of skipped.
+const RETIRED_INVARIANTS: &str = "invariants are no longer read: put `guards` (the paths it protects) and `why` on the check in kitsu.toml, and move the prose to a decision";
+
+fn is_retired_invariant(path: &str) -> bool {
+    path.strip_prefix(DIR)
+        .and_then(|p| p.strip_prefix("/invariants/"))
+        .is_some_and(|f| f.ends_with(".md") && !f.contains('/'))
 }
 
 pub fn classify(path: &str) -> Option<(Kind, &str)> {
@@ -992,18 +949,6 @@ struct DecisionFront {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct InvariantFront {
-    title: Option<String>,
-    state: Option<String>,
-    #[serde(default)]
-    scope: Vec<String>,
-    #[serde(default)]
-    checks: Vec<String>,
-    decision: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct QuestionFront {
     title: Option<String>,
     state: Option<String>,
@@ -1060,6 +1005,9 @@ struct CheckFile {
     timeout: Option<Timeout>,
     #[serde(default)]
     scope: Vec<String>,
+    #[serde(default)]
+    guards: Vec<String>,
+    why: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1102,6 +1050,11 @@ fn parse_config(text: &str) -> Result<Config, String> {
                 run: c.run,
                 timeout_secs,
                 scope: Scope::new(c.scope),
+                guards: Scope::new(c.guards),
+                why: c
+                    .why
+                    .map(|w| w.trim().to_string())
+                    .filter(|w| !w.is_empty()),
             },
         );
     }
@@ -1148,10 +1101,6 @@ mod tests {
                 "+++\nrejected = [\"infinite retry\"]\n+++\n# Retry at most three times\n",
             ),
             (
-                ".kitsu/invariants/idem.md",
-                "+++\ntitle = \"Stable idempotency key\"\nscope = [\"src/client/**\"]\nchecks = [\"test\"]\ndecision = \"bounded\"\n+++\n",
-            ),
-            (
                 ".kitsu/questions/dedupe.md",
                 "+++\ntitle = \"Does upstream dedupe?\"\nblocks = [\"retry\"]\n+++\n",
             ),
@@ -1163,12 +1112,8 @@ mod tests {
             intent.decisions["bounded"].title,
             "Retry at most three times"
         );
-        assert_eq!(
-            intent.invariants["idem"].decision.as_deref(),
-            Some("bounded")
-        );
         assert_eq!(intent.open_questions_blocking("retry").count(), 1);
-        assert!(intent.protected().contains(".kitsu/invariants/idem.md"));
+        assert!(intent.protected().contains(".kitsu/decisions/bounded.md"));
         assert!(intent.protected().contains("tests/a.rs"));
     }
 
@@ -1193,13 +1138,17 @@ mod tests {
             .map(|p| format!("{}: {}", p.path, p.detail))
             .collect();
         assert_eq!(intent.problems.len(), 5, "{msgs:#?}");
-        assert!(
+        // A leftover invariant is a rule that stopped binding: loud, both
+        // when it parses and when it doesn't.
+        assert_eq!(
             msgs.iter()
-                .any(|m| m.contains("typo.md") && m.contains("scpoe"))
+                .filter(|m| m.contains("/invariants/") && m.contains("no longer read"))
+                .count(),
+            2,
+            "{msgs:#?}"
         );
         assert!(msgs.iter().any(|m| m.contains("unknown check `tset`")));
         assert!(msgs.iter().any(|m| m.contains("unknown task `ghost`")));
-        assert!(!intent.invariants.contains_key("typo"));
     }
 
     #[test]
@@ -1228,14 +1177,31 @@ mod tests {
     }
 
     #[test]
+    fn checks_carry_what_they_guard_and_why() {
+        let intent = Intent::from_files(files(&[(
+            CONFIG,
+            "[checks.idem]\nrun = \"pytest\"\nguards = [\"payments.py\"]\nwhy = \"\"\"\nOne key per charge.\n\"\"\"\n[checks.lint]\nrun = \"ruff\"\nwhy = \"  \"\n",
+        )]));
+        assert!(intent.problems.is_empty(), "{:?}", intent.problems);
+        let idem = &intent.config.checks["idem"];
+        assert_eq!(idem.guards.globs(), ["payments.py"]);
+        assert_eq!(idem.why.as_deref(), Some("One key per charge."));
+        let lint = &intent.config.checks["lint"];
+        assert!(lint.guards.is_everything() && lint.why.is_none());
+    }
+
+    #[test]
     fn check_fingerprint_tracks_command_not_scope() {
         let a = CheckDef {
             name: "t".into(),
             run: "cargo test".into(),
             timeout_secs: 60,
             scope: Scope::new(["a/**"]),
+            guards: Scope::new(["a/**"]),
+            why: None,
         };
         let mut b = a.clone();
+        b.guards = Scope::new(["c/**"]);
         b.scope = Scope::new(["b/**"]);
         assert_eq!(a.fingerprint(), b.fingerprint());
         b.run = "cargo test --all".into();

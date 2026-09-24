@@ -126,7 +126,7 @@
   <footer>
     <button class="foot-link" class:on={app.view.kind === "rules"} onclick={() => app.go({ kind: "rules" })}>
       {t("rail.rules")}
-      {#if ov}<span class="hint">{t("rail.invariants", { n: ov.counts.invariants })} · {t("rail.decisions", { n: ov.counts.decisions })}{ov.counts.memory ? ` · ${t("rail.memory", { n: ov.counts.memory })}` : ""}{ov.counts.open_questions ? ` · ${t("rail.openQuestions", { n: ov.counts.open_questions })}` : ""}</span>{/if}
+      {#if ov}<span class="hint">{t("rail.checks", { n: ov.counts.checks })} · {t("rail.decisions", { n: ov.counts.decisions })}{ov.counts.memory ? ` · ${t("rail.memory", { n: ov.counts.memory })}` : ""}{ov.counts.open_questions ? ` · ${t("rail.openQuestions", { n: ov.counts.open_questions })}` : ""}</span>{/if}
     </button>
     <div class="keys hint"><kbd>⌘K</kbd> {t("rail.keyCommands")} <kbd>n</kbd> {t("rail.keyNew")} <kbd>?</kbd> {t("rail.keyKeys")}</div>
   </footer>

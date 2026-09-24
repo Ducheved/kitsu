@@ -18,5 +18,5 @@ commits earlier, missed `index.rs` and `mcp.rs` (and `arch.rs`) when first
 checked against the current tree.
 
 Done: the base (element files, `kitsu arch`, `kitsu arch check`, the
-`architecture-matches-the-code` invariant, Kitsu's own model). The later
+`architecture` check guarding the code, Kitsu's own model). The later
 parts are `architecture-drift`.

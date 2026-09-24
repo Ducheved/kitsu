@@ -78,7 +78,7 @@ export interface Overview {
   since: Digest;
   agents: Agent[];
   problems: { path: string; detail: string }[];
-  counts: { invariants: number; decisions: number; open_questions: number; checks: number; memory?: number };
+  counts: { decisions: number; open_questions: number; checks: number; memory?: number };
 }
 
 export type RunState = "starting" | "running" | "stopping" | "finished" | "failed" | "interrupted";
@@ -204,11 +204,10 @@ export type Accepted =
   | { result: "checks_failed"; failing: string[]; candidate: string };
 
 export interface Rules {
-  invariants: { id: string; title: string; active: boolean; scope: string[]; checks: { name: string; status: CheckStatus }[]; decision: string | null; body: string; path: string }[];
   decisions: { id: string; title: string; state: string; scope: string[]; rejected: string[]; body: string; path: string }[];
   questions: { id: string; title: string; open: boolean; blocks: string[]; answer: string | null; body: string; path: string }[];
   memory: MemoryNote[];
-  checks: { name: string; run: string; scope: string[]; status: CheckStatus }[];
+  checks: { name: string; run: string; scope: string[]; guards: string[]; why: string | null; status: CheckStatus }[];
 }
 
 export type MemoryKind = "fact" | "gotcha" | "convention" | "preference" | "lesson";

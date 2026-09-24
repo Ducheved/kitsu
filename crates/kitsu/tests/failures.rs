@@ -24,7 +24,7 @@ struct Env {
 impl Drop for Env {
     fn drop(&mut self) {
         // Every scenario ends by checking that each run's stored state is
-        // the end of its recorded transitions (invariant
+        // the end of its recorded transitions (decision
         // run-row-is-the-fold-of-its-events).
         if !std::thread::panicking()
             && let Ok(ws) = Workspace::discover(&self.repo)
@@ -553,12 +553,19 @@ fn evidence_goes_stale_when_you_edit_what_it_covers() {
     env.run_with(&agent("good"), "rgood", &[]);
     env.ok(&["accept", "rgood"]);
     let _ = env.out(&["check"]);
-    let show = env.ok(&["show", "one-key-per-charge"]);
-    assert!(show.contains("pass"), "{show}");
+    // `show` on the task lists every check it needs, guards included.
+    let idem = |show: &str| -> String {
+        show.lines()
+            .find(|l| l.trim_start().starts_with("idempotency"))
+            .unwrap_or("")
+            .to_string()
+    };
+    let show = env.ok(&["show", "bounded-retries"]);
+    assert!(idem(&show).contains("pass"), "{show}");
     // Outside the idempotency check's scope: still fresh.
     std::fs::write(env.repo.join("README.md"), "hello").expect("write");
-    let show = env.ok(&["show", "one-key-per-charge"]);
-    assert!(show.contains("pass (unchanged scope)"), "{show}");
+    let show = env.ok(&["show", "bounded-retries"]);
+    assert!(idem(&show).contains("pass (unchanged scope)"), "{show}");
     // Inside it: stale, and it says which file.
     let p = env.repo.join("payments.py");
     std::fs::write(
@@ -566,8 +573,8 @@ fn evidence_goes_stale_when_you_edit_what_it_covers() {
         std::fs::read_to_string(&p).expect("read") + "\n# touched\n",
     )
     .expect("write");
-    let show = env.ok(&["show", "one-key-per-charge"]);
-    assert!(show.contains("stale since: payments.py"), "{show}");
+    let show = env.ok(&["show", "bounded-retries"]);
+    assert!(idem(&show).contains("stale since: payments.py"), "{show}");
 }
 
 #[test]
@@ -624,8 +631,8 @@ fn a_broken_rule_file_blocks_accept_and_is_loud_in_the_brief() {
     let env = Env::new("broken");
     env.run_with(&agent("good"), "rgood", &[]);
     std::fs::write(
-        env.repo.join(".kitsu/invariants/one-key-per-charge.md"),
-        "+++\nchecks = oops\n+++\n",
+        env.repo.join(".kitsu/decisions/one-key-per-charge.md"),
+        "+++\nscope = oops\n+++\n",
     )
     .expect("write");
     let brief = env.ok(&["brief", "bounded-retries"]);
@@ -850,13 +857,14 @@ mcp = { tool = "nope" }
     );
     assert!(
         said.contains("`idempotency`"),
-        "the invariant's check is required:\n{said}"
+        "the guarding check is required:\n{said}"
     );
     // search finds the code at the base commit.
     assert!(said.contains("payments.py:"), "{said}");
-    // rules_for names the invariant covering the file.
+    // rules_for names the check guarding the file, and why.
     assert!(
-        said.contains("must hold: One idempotency key per logical charge"),
+        said.contains("must pass: check `idempotency` guards it")
+            && said.contains("One idempotency key per logical charge"),
         "{said}"
     );
     assert!(
@@ -931,16 +939,11 @@ fn a_module_outside_the_architecture_model_fails_its_check() {
     }
     let config = env.repo.join(".kitsu/kitsu.toml");
     let mut toml = std::fs::read_to_string(&config).expect("config");
+    // Required for every change to a module or to the model.
     toml.push_str(&format!(
-        "\n[architecture]\ncover = [\"*.py\"]\n\n[checks.architecture]\nrun = \"{KITSU} arch check\"\ntimeout = \"1m\"\n"
+        "\n[architecture]\ncover = [\"*.py\"]\n\n[checks.architecture]\nrun = \"{KITSU} arch check\"\ntimeout = \"1m\"\nguards = [\"*.py\", \".kitsu/architecture/**\"]\n"
     ));
     std::fs::write(&config, toml).expect("config");
-    // A check is required through a rule: this one covers every module.
-    std::fs::write(
-        env.repo.join(".kitsu/invariants/modules-have-a-component.md"),
-        "+++\ntitle = \"Every module belongs to one component\"\nscope = [\"*.py\", \".kitsu/architecture/**\"]\nchecks = [\"architecture\"]\n+++\n",
-    )
-    .expect("invariant");
     git(&env.repo, &["add", "-A"]);
     git(&env.repo, &["commit", "-qm", "model"]);
     let here = env.ok(&["arch", "check"]);

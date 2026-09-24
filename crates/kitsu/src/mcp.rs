@@ -257,22 +257,18 @@ impl Server {
             "Rules that cover `{path}` (from the main checkout, which is what accept checks against):\n"
         );
         let mut any = false;
-        for inv in intent
-            .invariants
+        for c in intent
+            .config
+            .checks
             .values()
-            .filter(|i| i.scope.may_overlap(&here))
+            .filter(|c| !c.guards.is_everything() && c.guards.may_overlap(&here))
         {
             any = true;
-            let checks = if inv.checks.is_empty() {
-                "not machine-checked".to_string()
-            } else {
-                format!("checked by {}", inv.checks.join(", "))
-            };
             out.push_str(&format!(
-                "\n- must hold: {} (`{}`, {checks})\n",
-                inv.title, inv.id
+                "\n- must pass: check `{}` guards it (`{}`)\n",
+                c.name, c.run
             ));
-            for l in excerpt(&inv.body, 8) {
+            for l in excerpt(c.why.as_deref().unwrap_or(""), 8) {
                 out.push_str(&format!("  {l}\n"));
             }
         }
@@ -283,21 +279,21 @@ impl Server {
         {
             any = true;
             out.push_str(&format!("\n- decision: {} (`{}`)\n", d.title, d.id));
+            for l in excerpt(&d.body, 8) {
+                out.push_str(&format!("  {l}\n"));
+            }
             for r in &d.rejected {
                 out.push_str(&format!("  rejected: {r}\n"));
             }
         }
-        for c in intent
-            .config
-            .checks
-            .values()
-            .filter(|c| !c.scope.is_everything() && c.scope.may_overlap(&here))
-        {
+        for c in intent.config.checks.values().filter(|c| {
+            c.guards.is_everything() && !c.scope.is_everything() && c.scope.may_overlap(&here)
+        }) {
             any = true;
             out.push_str(&format!("\n- check `{}` covers it: `{}`\n", c.name, c.run));
         }
         if !any {
-            out.push_str("\nNo invariant, decision or check names this path specifically. Repository-wide rules are in your brief.\n");
+            out.push_str("\nNo decision or check names this path specifically. Repository-wide rules are in your brief.\n");
         }
         Ok(out)
     }
@@ -406,7 +402,7 @@ fn tools() -> Value {
         },
         {
             "name": "rules_for",
-            "description": "The invariants, decisions and checks that cover a path, from the rules accept will judge by. Ask before changing a file you don't know.",
+            "description": "The checks and decisions that cover a path, from the rules accept will judge by. Ask before changing a file you don't know.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "path": { "type": "string", "description": "Repository-relative path or glob" } },

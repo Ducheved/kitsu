@@ -8,7 +8,7 @@
 //! ```
 //!
 //! Three things this refuses to do:
-//! - judge a change by rules the change itself edited. Checks and invariants
+//! - judge a change by rules the change itself edited. Checks and what they guard
 //!   come from the main worktree, which the agent never writes to.
 //! - trust per-worktree green. Two changes that each pass can break each
 //!   other; the checks run on the combined result.

@@ -4,8 +4,8 @@ If you're an agent started by Kitsu, your brief already has what follows.
 If you're not, read this.
 
 - What's being worked on, what must stay true and what was decided (and
-  rejected) is in `.kitsu/`. Read the invariants that cover the files you
-  touch before you change them.
+  rejected) is in `.kitsu/`. Read the decisions and the checks whose
+  `guards` cover the files you touch before you change them.
 - Checks are defined in `.kitsu/kitsu.toml`. `kitsu check` runs them;
   without kitsu: `cargo fmt --all --check`, `cargo clippy --workspace
   --all-targets -- -D warnings`, `cargo test --workspace`, `cargo run -q

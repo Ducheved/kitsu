@@ -344,6 +344,8 @@ mod tests {
             run: run.into(),
             timeout_secs: 5,
             scope: Scope::new(scope.iter().copied()),
+            guards: Scope::default(),
+            why: None,
         }
     }
 

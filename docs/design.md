@@ -1,8 +1,8 @@
 # How Kitsu works
 
 This is the design as built, not a wish list. Where something isn't done or
-isn't known, it says so. The executable parts of the design (invariants,
-decisions, next tasks) live in [`.kitsu/`](../.kitsu) and are checked by
+isn't known, it says so. The executable parts of the design (checks and
+what they guard, decisions, next tasks) live in [`.kitsu/`](../.kitsu) and are checked by
 Kitsu itself.
 
 ## 1. The problem, narrowed
@@ -29,7 +29,7 @@ them is a projection.
 | State | Owner | Kitsu's role |
 |---|---|---|
 | Source code, history, branches | git | reads; commits snapshots on `kitsu/run/*`; fast-forwards on accept |
-| Tasks, invariants, decisions, questions | git (files in `.kitsu/`) | parses, validates, links; never stores a copy |
+| Tasks, checks, decisions, questions | git (files in `.kitsu/`) | parses, validates, links; never stores a copy |
 | Whether a task is open or done | the task file (`state`), set by a human | writes it only when you accept-and-close or close it yourself |
 | Task status (ready, running, review, blocked) | nobody: derived on every read | computes it |
 | Runs, their lifecycle, custody | `state.db` | sole writer via transactions |
@@ -144,13 +144,11 @@ the checks they define can't be enforced. Tested by
 The brief replaces "remember everything" with "compile what applies, say
 why, say what's missing":
 
-1. The task, its body, and what done means (its checks, plus the checks of
-   every active invariant whose scope overlaps the task's scope, each with
-   the reason it's required and its current status on the base commit).
+1. The task, its body, and what done means (its checks, plus every check
+   whose `guards` overlap the task's scope, each with the reason it's
+   required, its `why`, and its current status on the base commit).
 2. Broken rule files, loudly.
-3. Invariants in scope, with their text and enforcement ("checked by X" or
-   "not machine-checked").
-4. Decisions that apply, with rejected alternatives. This is where "don't
+3. Decisions that apply, with rejected alternatives. This is where "don't
    add infinite retry" lives.
 5. Questions about the task: answers if answered; if open, "don't guess".
 6. Earlier attempts: who, outcome, files changed, check results, the note

@@ -34,7 +34,7 @@ fn temp_repo(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("kitsu-scale-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join(".kitsu/tasks")).expect("mkdir");
-    std::fs::create_dir_all(root.join(".kitsu/invariants")).expect("mkdir");
+    std::fs::create_dir_all(root.join(".kitsu/decisions")).expect("mkdir");
     let git = |args: &[&str]| {
         let ok = Command::new("git")
             .args(args)
@@ -56,7 +56,7 @@ fn report(what: &str, v: serde_json::Value) {
     println!("{}", json!({ "probe": what, "result": v }));
 }
 
-/// N tasks, N/4 invariants, N runs spread across every state. Times what
+/// N tasks, N/4 scoped decisions, N runs spread across every state. Times what
 /// `kitsu status` and the app's task list do on every refresh.
 fn state(n: usize) {
     let root = temp_repo("state");
@@ -79,10 +79,13 @@ fn state(n: usize) {
     }
     for i in 0..n / 4 {
         std::fs::write(
-            root.join(format!(".kitsu/invariants/i{i}.md")),
-            format!("+++\ntitle = \"Invariant {i}\"\nscope = [\"src/m{}/**\"]\nchecks = [\"unit\"]\n+++\nWhy it matters.\n", i % 50),
+            root.join(format!(".kitsu/decisions/d{i}.md")),
+            format!(
+                "+++\ntitle = \"Decision {i}\"\nscope = [\"src/m{}/**\"]\n+++\nWhy it matters.\n",
+                i % 50
+            ),
         )
-        .expect("inv");
+        .expect("decision");
     }
     std::fs::write(root.join("README.md"), "x").expect("readme");
     let _ = Command::new("git")
@@ -176,9 +179,9 @@ fn state(n: usize) {
     report(
         "state",
         json!({
-            "tasks": n, "invariants": n / 4, "runs": n,
+            "tasks": n, "decisions": n / 4, "runs": n,
             "load_intent_ms": load_ms, "insert_runs_ms": insert_ms, "status_ms": status_ms,
-            "brief_ms": brief_ms, "brief_bytes": b.markdown.len(), "brief_invariants": b.included.iter().filter(|i| i.kind == "invariant").count(),
+            "brief_ms": brief_ms, "brief_bytes": b.markdown.len(), "brief_decisions": b.included.iter().filter(|i| i.kind == "decision").count(),
             "brief_omitted": b.omitted.len(), "views": views.len(), "db_bytes": db, "rss_kib": rss_kib(std::process::id())
         }),
     );

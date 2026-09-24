@@ -115,7 +115,7 @@
   }
 
   const kindLabel = (k: string) =>
-    k === "invariant" ? t("kind.invariant") : k === "decision" ? t("kind.decision") : k === "question" ? t("kind.question") : k === "memory" ? t("kind.memory") : k === "code" ? t("kind.code") : k;
+    k === "decision" ? t("kind.decision") : k === "question" ? t("kind.question") : k === "memory" ? t("kind.memory") : k === "code" ? t("kind.code") : k;
 </script>
 
 {#if error && !detail}

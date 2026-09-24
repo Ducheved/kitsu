@@ -7,7 +7,7 @@ rejected = [
   "A vector store for 'memory': the things that must survive are typed (rule, decision, question, evidence), and none of them is found by similarity",
 ]
 +++
-Tasks, decisions, invariants and questions are Markdown with TOML front
+Tasks, decisions and questions are Markdown with TOML front
 matter under `.kitsu/`. Git versions, branches, merges and reviews them with
 the code they describe. Delete Kitsu and they're still readable.
 

@@ -4,7 +4,7 @@
 Answers "does the agent still see Kitsu's rules after it compacts its own
 context?" without a model or an API key. The stub (server.py) answers the
 Nth request with a context-overflow error, which makes Claude Code compact;
-then this prints, for every request, whether the invariant text, "Done
+then this prints, for every request, whether the rule text, "Done
 means" and the task title are in the system prompt (sys) or the messages
 (msg).
 
@@ -54,7 +54,7 @@ print("kitsu run exit", r.returncode, r.stderr.strip().splitlines()[-1:] )
 def txt(c):
     if isinstance(c, str): return c
     return "\n".join((b.get("text") or "") if b.get("type") != "tool_result" else txt(b.get("content")) for b in c or [])
-marks = {"invariant": "One idempotency key per logical charge", "done-means": "Done means", "task-title": "Stop retrying forever", "appended": (a.append or "\0")[:40]}
+marks = {"rule": "One idempotency key per logical charge", "done-means": "Done means", "task-title": "Stop retrying forever", "appended": (a.append or "\0")[:40]}
 for i, l in enumerate(open(f"{W}/requests.jsonl")):
     rq = json.loads(l); b = rq["body"]
     sys_t = txt(b.get("system")) if isinstance(b.get("system"), list) else str(b.get("system") or "")

@@ -6,7 +6,7 @@ checks = ["test"]
 A local stub model server (OpenAI- and Anthropic-compatible) that records
 every request and scripts tool calls until the agent compacts. Point
 Claude Code, OpenCode and Codex at it, run a Kitsu task, and check that
-every open invariant's text is still in the post-compaction requests.
+every required check's `why` is still in the post-compaction requests.
 No API spend.
 
 Done when the result per agent is recorded (N ≥ 5 sessions each). Wire

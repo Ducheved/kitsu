@@ -60,22 +60,17 @@
 
   {#if rules}
     <div class="section-title">{t("rules.mustHold")}</div>
-    {#each rules.invariants.filter((i) => i.active) as inv (inv.id)}
+    {#each rules.checks.filter((c) => c.guards.length) as c (c.name)}
+      {@const w = checkWord(c.status)}
       <div class="item">
         <div class="item-head">
-          <span class="item-title">{inv.title}</span>
-          {#each inv.checks as c (c.name)}
-            {@const w = checkWord(c.status)}
-            <span class="pill {w.tone}" title={w.hint ?? ""}>{c.name} {w.word}</span>
-          {:else}
-            <span class="pill dim" title={t("rules.reviewOnlyHint")}>{t("rules.reviewOnly")}</span>
-          {/each}
+          <span class="item-title">{c.why ?? c.name}</span>
+          <span class="pill {w.tone}" title={w.hint ?? ""}>{c.name} {w.word}</span>
         </div>
-        {#if inv.body.trim()}<div class="prose small">{@html render(inv.body)}</div>{/if}
-        <div class="hint mono">{inv.scope.length ? inv.scope.join(", ") : t("rules.wholeRepo")}{inv.decision ? ` · ${t("rules.from", { decision: inv.decision })}` : ""}</div>
+        <div class="hint mono">{t("rules.guards", { paths: c.guards.join(", ") })}</div>
       </div>
     {:else}
-      <p class="hint">{t("rules.noInvariants")}</p>
+      <p class="hint">{t("rules.noGuards")}</p>
     {/each}
 
     <div class="section-title">{t("rules.decisions")}</div>

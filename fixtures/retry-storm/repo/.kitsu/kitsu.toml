@@ -6,6 +6,8 @@ timeout = "1m"
 run = "python3 -m unittest -q test_idempotency"
 timeout = "1m"
 scope = ["payments.py", "fake_upstream.py", "test_idempotency.py"]
+guards = ["payments.py"]
+why = "One idempotency key per logical charge, reused by every retry: a retry after a lost response must not charge twice."
 
 [protect]
 paths = ["test_*.py", "fake_upstream.py"]

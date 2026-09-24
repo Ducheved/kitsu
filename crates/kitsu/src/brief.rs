@@ -10,16 +10,13 @@
 //! space and how to get it. It never summarizes a source into something
 //! stronger than the source: quoted rules link back to their files.
 
-use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use serde::Serialize;
 
 use crate::check::status_at;
 use crate::git::Git;
-use crate::intent::{
-    DecisionState, Intent, InvariantState, Memory, MemoryKind, MemoryState, QuestionState, Task,
-};
+use crate::intent::{DecisionState, Intent, Memory, MemoryKind, MemoryState, QuestionState, Task};
 use crate::memory::{self, Freshness, Personal};
 use crate::run::RunState;
 use crate::stats::estimate_tokens;
@@ -141,6 +138,11 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
             r.why.join(", "),
             at_base.unwrap_or_default()
         );
+        if let Some(why) = &def.why {
+            for line in excerpt(why, 6).lines() {
+                let _ = writeln!(out, "  {line}");
+            }
+        }
     }
     let _ = writeln!(
         out,
@@ -170,46 +172,6 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
         }
     }
 
-    // ---- required: invariants in scope ----
-    let invariants: Vec<_> = intent
-        .invariants
-        .values()
-        .filter(|i| i.state == InvariantState::Active && i.scope.may_overlap(&task.scope))
-        .collect();
-    if !invariants.is_empty() {
-        let _ = writeln!(out, "\n## Must hold");
-        for inv in &invariants {
-            let enforcement = if inv.checks.is_empty() {
-                "not machine-checked; the reviewer will look for it".to_string()
-            } else {
-                format!(
-                    "checked by {}",
-                    inv.checks
-                        .iter()
-                        .map(|c| format!("`{c}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            };
-            let _ = writeln!(out, "- **{}** (`{}`, {enforcement})", inv.title, inv.id);
-            let why = scope_reason(&task.scope, &inv.scope);
-            for line in excerpt(&inv.body, 12).lines() {
-                let _ = writeln!(out, "  {line}");
-            }
-            if let Some(d) = &inv.decision {
-                let _ = writeln!(out, "  Comes from decision `{d}`.");
-            }
-            included.push(Included {
-                kind: "invariant",
-                id: inv.id.clone(),
-                title: inv.title.clone(),
-                path: inv.source.path.clone(),
-                content_id: inv.source.content_id.clone(),
-                why,
-            });
-        }
-    }
-
     let anchor = format!(
         "# Kitsu rules for this run\n\nThis stays here when your context is compacted. The full brief is in the file named by $KITSU_BRIEF (or the `brief` tool of the `kitsu` MCP server); `orient` says where your checks stand now.\n\nTask `{}`: {}\n{}",
         task.id,
@@ -220,19 +182,14 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
     // ---- optional sections, in priority order ----
     let mut optional: Vec<Section> = Vec::new();
 
-    let linked: BTreeSet<&str> = invariants
-        .iter()
-        .filter_map(|i| i.decision.as_deref())
-        .collect();
     for d in intent
         .decisions
         .values()
         .filter(|d| d.state != DecisionState::Superseded)
     {
-        let by_link = linked.contains(d.id.as_str());
         let by_scope = !d.scope.is_everything() && d.scope.may_overlap(&task.scope);
-        let global = d.scope.is_everything() && !by_link;
-        if !(by_link || by_scope || global) {
+        let global = d.scope.is_everything();
+        if !(by_scope || global) {
             continue;
         }
         let mut body = String::new();
@@ -248,9 +205,7 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
         for r in &d.rejected {
             let _ = writeln!(body, "  - Rejected: {r}");
         }
-        let why = if by_link {
-            "linked from an invariant in scope".to_string()
-        } else if by_scope {
+        let why = if by_scope {
             scope_reason(&task.scope, &d.scope)
         } else {
             "applies to the whole repository".into()
@@ -499,7 +454,7 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
     );
     let _ = writeln!(
         out,
-        "- Changes under `.kitsu/` and other protected paths are shown to the reviewer as rule changes. Weakening a check or an invariant to get green will be seen."
+        "- Changes under `.kitsu/` and other protected paths are shown to the reviewer as rule changes. Weakening a check to get green will be seen."
     );
     let _ = writeln!(
         out,
@@ -639,19 +594,11 @@ mod tests {
         intent(&[
             (
                 ".kitsu/kitsu.toml",
-                "[checks.unit]\nrun = \"cargo test\"\n[checks.idem]\nrun = \"cargo test idem\"\n",
+                "[checks.unit]\nrun = \"cargo test\"\n[checks.idem]\nrun = \"cargo test idem\"\nguards = [\"src/client/**\"]\nwhy = \"Stable idempotency key: it comes from the operation, never the attempt.\"\n[checks.ui]\nrun = \"npm test\"\nguards = [\"app/**\"]\nwhy = \"UI never blocks\"\n",
             ),
             (
                 ".kitsu/tasks/retry.md",
                 "+++\ntitle = \"Bound retries\"\nscope = [\"src/client/**\"]\nchecks = [\"unit\"]\n+++\nUpstream times out.\n",
-            ),
-            (
-                ".kitsu/invariants/idem.md",
-                "+++\ntitle = \"Stable idempotency key\"\nscope = [\"src/client/**\"]\nchecks = [\"idem\"]\ndecision = \"bounded\"\n+++\nKey comes from the operation, never the attempt.\n",
-            ),
-            (
-                ".kitsu/invariants/ui.md",
-                "+++\ntitle = \"UI never blocks\"\nscope = [\"app/**\"]\n+++\n",
             ),
             (
                 ".kitsu/decisions/bounded.md",
@@ -691,19 +638,25 @@ mod tests {
         assert!(md.contains("Rejected: infinite retry"));
         assert!(md.contains("Answer: Yes, for 24h."));
         assert!(
-            md.contains("`idem` passes"),
-            "invariant check becomes required:\n{md}"
+            md.contains("`idem` passes") && md.contains("(required by guards src/client/**)"),
+            "a guarding check becomes required:\n{md}"
         );
         assert!(
-            !md.contains("UI never blocks"),
-            "out-of-scope invariant leaked in"
+            !md.contains("UI never blocks") && !md.contains("`ui` passes"),
+            "a check guarding other paths leaked in"
         );
-        let inv = b
+        let d = b
             .included
             .iter()
-            .find(|x| x.id == "idem")
-            .expect("idem included");
-        assert!(inv.why.contains("overlaps"));
+            .find(|x| x.id == "bounded")
+            .expect("decision in scope included");
+        assert!(d.why.contains("overlaps"));
+        // What a check protects rides in the part that survives compaction.
+        assert!(
+            b.anchor.contains("comes from the operation"),
+            "{}",
+            b.anchor
+        );
     }
 
     #[test]
@@ -720,7 +673,7 @@ mod tests {
         let b = compile(&cx(&i, 25), &i.tasks["retry"]);
         assert!(
             b.markdown.contains("Stable idempotency key"),
-            "invariants are never trimmed"
+            "what a required check protects is never trimmed"
         );
         assert!(
             b.omitted.iter().any(|o| o.id == "bounded"),
@@ -818,7 +771,7 @@ mod tests {
     fn broken_rule_files_are_loud() {
         let i = intent(&[
             (".kitsu/tasks/t.md", "+++\n+++\n"),
-            (".kitsu/invariants/bad.md", "+++\nnope\n+++\n"),
+            (".kitsu/decisions/bad.md", "+++\nnope\n+++\n"),
         ]);
         let b = compile(&cx(&i, DEFAULT_BUDGET), &i.tasks["t"]);
         assert!(b.markdown.contains("could not be read"));
