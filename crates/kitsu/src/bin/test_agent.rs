@@ -324,7 +324,8 @@ fn main() {
         },
         None => Script::default(),
     };
-    let (tx, rx) = mpsc::channel();
+    // Bounded: if the script is busy, stop reading instead of buffering.
+    let (tx, rx) = mpsc::sync_channel(64);
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
             let Ok(line) = line else { break };

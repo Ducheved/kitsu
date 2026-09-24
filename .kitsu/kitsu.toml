@@ -1,0 +1,38 @@
+# Kitsu's own rules, checked by Kitsu. `kitsu status` in this repo shows
+# what's next; `kitsu check` runs these.
+
+[checks.fmt]
+run = "cargo fmt --all --check"
+timeout = "2m"
+scope = ["**/*.rs"]
+
+[checks.lint]
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+timeout = "15m"
+scope = ["crates/**", "app/src-tauri/**", "Cargo.toml", "Cargo.lock"]
+
+[checks.test]
+run = "cargo test --workspace"
+timeout = "15m"
+scope = ["crates/**", "app/src-tauri/**", "fixtures/**", "Cargo.toml", "Cargo.lock"]
+
+[checks.ui]
+run = "cd app && npm run check && npm test && npm run build"
+timeout = "10m"
+scope = ["app/src/**", "app/tests/**", "app/package.json", "app/package-lock.json", "app/*.config.*", "app/tsconfig.json"]
+
+# Every channel between tasks or processes has a bound. An unbounded queue
+# is an OOM that hasn't happened yet.
+[checks.bounded]
+run = "! grep -rnE 'unbounded_channel|mpsc::channel\\(\\)' crates app/src-tauri/src"
+timeout = "30s"
+scope = ["crates/**", "app/src-tauri/src/**"]
+
+# The webview gets typed commands, never generic fs/shell/http powers.
+[checks.webview-powers]
+run = "! grep -nE 'tauri-plugin-(fs|shell|http|process)' app/src-tauri/Cargo.toml && ! grep -nE '\"(fs|shell|http|process):' app/src-tauri/capabilities/*.json"
+timeout = "30s"
+scope = ["app/src-tauri/Cargo.toml", "app/src-tauri/capabilities/**"]
+
+[protect]
+paths = ["crates/kitsu/tests/**", "fixtures/**", "app/src-tauri/capabilities/**", "app/src-tauri/tauri.conf.json"]

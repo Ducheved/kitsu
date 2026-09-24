@@ -331,6 +331,12 @@ pub async fn start_run(
     if !matches!(policy.as_str(), "ask" | "auto") {
         return Err(invalid("policy must be ask or auto"));
     }
+    // These end up on a command line. An id like `--from=x` must never be
+    // parsed as a flag, whatever the window sends.
+    intent::valid_id(&task).map_err(invalid)?;
+    if let Some(f) = &from {
+        intent::valid_id(f).map_err(invalid)?;
+    }
     agents::resolve(&agent)?;
     let id = short_id('r');
     let exe = std::env::current_exe().map_err(|e| invalid(e.to_string()))?;
@@ -343,11 +349,14 @@ pub async fn start_run(
         "run", &task, "--agent", &agent, "--policy", &policy, "--id", &id, "-q",
     ]);
     if let Some(n) = note.as_deref().filter(|n| !n.trim().is_empty()) {
-        cmd.args(["--note", n]);
+        // `--note=<text>` so a note starting with `-` stays a value.
+        cmd.arg(format!("--note={n}"));
     }
     if let Some(f) = &from {
         cmd.args(["--from", f]);
     }
+    // After `--`, clap treats the task id as a positional no matter what.
+    cmd.args(["--", &task]);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(log);
