@@ -19,10 +19,14 @@ use crate::check::status_at;
 use crate::git::Git;
 use crate::intent::{DecisionState, Intent, InvariantState, QuestionState, Task};
 use crate::run::RunState;
+use crate::stats::estimate_tokens;
 use crate::status::required_checks;
 use crate::store::{RunRow, Store};
 
-pub const DEFAULT_BUDGET: usize = 24_000;
+/// In estimated tokens (see `stats::estimate_tokens`), the unit the rest of
+/// Kitsu reports in. Required parts are never trimmed, so a brief can go
+/// over; only optional sections are dropped to fit.
+pub const DEFAULT_BUDGET: usize = 6_000;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Included {
@@ -308,7 +312,7 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
             } else {
                 0
             };
-        if out.len() + needed > cx.budget {
+        if estimate_tokens((out.len() + needed) as u64) > cx.budget as u64 {
             omitted.push(Omitted {
                 kind: s.kind,
                 id: s.id,
@@ -556,7 +560,7 @@ mod tests {
     #[test]
     fn budget_drops_optional_sections_but_never_constraints() {
         let i = fixture();
-        let b = compile(&cx(&i, 100), &i.tasks["retry"]);
+        let b = compile(&cx(&i, 25), &i.tasks["retry"]);
         assert!(
             b.markdown.contains("Stable idempotency key"),
             "invariants are never trimmed"

@@ -278,7 +278,14 @@ pub async fn drive(
     let mut rec = Recorder::new(id, &prep.worktree, echo);
 
     // ---- handshake ----
-    let session = match handshake(&client, &prep.worktree, &mut incoming).await {
+    let session = match handshake(
+        &client,
+        &prep.worktree,
+        opts.agent.meta.as_ref(),
+        &mut incoming,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
             let detail = format!("{e} (agent log: {})", log_path.display());
@@ -426,9 +433,20 @@ pub async fn drive(
     Ok(store.run(id)?.state)
 }
 
+/// `session/new` parameters. No MCP servers yet; `_meta` only for agents
+/// configured with it.
+fn session_new_params(cwd: &str, meta: Option<&Value>) -> Value {
+    let mut p = json!({ "cwd": cwd, "mcpServers": [] });
+    if let Some(m) = meta {
+        p["_meta"] = m.clone();
+    }
+    p
+}
+
 async fn handshake(
     client: &Client,
     worktree: &Path,
+    meta: Option<&Value>,
     incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
 ) -> Result<String> {
     let init = with_violations(
@@ -451,7 +469,7 @@ async fn handshake(
         incoming,
         tokio::time::timeout(
             INIT_TIMEOUT,
-            client.request("session/new", json!({ "cwd": cwd, "mcpServers": [] })),
+            client.request("session/new", session_new_params(&cwd, meta)),
         ),
     )
     .await?;
@@ -872,6 +890,16 @@ impl Recorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_new_sends_meta_only_when_configured() {
+        let plain = session_new_params("/w", None);
+        assert!(plain.get("_meta").is_none());
+        let meta = json!({ "systemPrompt": { "excludeDynamicSections": true } });
+        let with = session_new_params("/w", Some(&meta));
+        assert_eq!(with["_meta"], meta);
+        assert_eq!(with["cwd"], "/w");
+    }
 
     fn perm(kind: &str, path: &str) -> Value {
         json!({

@@ -72,6 +72,7 @@ enum Cmd {
     /// worktree with no task, prints the brief that run was given.
     Brief {
         task: Option<String>,
+        /// Size limit for optional sections, in estimated tokens.
         #[arg(long, default_value_t = brief::DEFAULT_BUDGET)]
         budget: usize,
     },

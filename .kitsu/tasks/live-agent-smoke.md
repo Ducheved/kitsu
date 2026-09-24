@@ -7,6 +7,10 @@ Everything so far is verified against `kitsu-test-agent`, which speaks ACP
 exactly the way we wrote it. Run `claude`, `codex` and `gemini` adapters on
 fixtures/retry-storm, three trials each, and record: did the brief's
 invariant survive (idempotency check), permission requests seen, protocol
-surprises, wall time, cost.
+surprises, wall time, cost (`kitsu stats`).
+
+For claude, run two tasks back to back and check the second reports cache
+reads on the system prompt (decision `prompt-cache`). If it doesn't, the
+`excludeDynamicSections` switch isn't doing what its docs say.
 
 Needs an API budget first.
