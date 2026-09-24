@@ -383,28 +383,54 @@ impl Git {
     /// candidate is judged by from the target branch rather than from the
     /// candidate itself.
     pub fn files_at(&self, rev: &str, prefix: &str) -> Result<Vec<(String, Vec<u8>)>> {
-        let listing = self.run_bytes(["ls-tree", "-r", "-z", "--full-tree", rev, "--", prefix])?;
+        let blobs = self.tree_blobs(rev, prefix)?;
+        let contents = self.read_blobs(blobs.iter().map(|b| b.oid.as_str()))?;
+        Ok(blobs.into_iter().map(|b| b.path).zip(contents).collect())
+    }
+
+    /// Every blob under `prefix` at `rev` (empty prefix: the whole tree),
+    /// with its size. Submodules and symlinks are skipped.
+    pub fn tree_blobs(&self, rev: &str, prefix: &str) -> Result<Vec<TreeBlob>> {
+        let mut args = vec!["ls-tree", "-r", "-z", "-l", "--full-tree", rev];
+        if !prefix.is_empty() {
+            args.extend(["--", prefix]);
+        }
+        let listing = self.run_bytes(args)?;
         let mut blobs = Vec::new();
         for rec in split_z(&listing) {
-            // "<mode> <type> <oid>\t<path>"
+            // "<mode> <type> <oid> <size padded>\t<path>"
             let Some((meta, path)) = rec.split_once('\t') else {
                 continue;
             };
-            let mut it = meta.split(' ');
-            let (_mode, kind, oid) = (it.next(), it.next(), it.next());
+            let mut it = meta.split_whitespace();
+            let (mode, kind, oid, size) = (it.next(), it.next(), it.next(), it.next());
             if kind == Some("blob")
-                && let Some(oid) = oid
+                && mode != Some("120000")
+                && let (Some(oid), Some(size)) = (oid, size.and_then(|s| s.parse().ok()))
             {
-                blobs.push((path.to_string(), oid.to_string()));
+                blobs.push(TreeBlob {
+                    path: path.to_string(),
+                    oid: oid.to_string(),
+                    size,
+                });
             }
         }
-        if blobs.is_empty() {
-            return Ok(Vec::new());
-        }
+        Ok(blobs)
+    }
+
+    /// Contents of the given blobs, in order, through one `cat-file --batch`.
+    /// Ids are written from another thread: writing them all first and then
+    /// reading deadlocks once both pipe buffers are full.
+    pub fn read_blobs<'a>(&self, oids: impl IntoIterator<Item = &'a str>) -> Result<Vec<Vec<u8>>> {
         let mut input = String::new();
-        for (_, oid) in &blobs {
+        let mut want = Vec::new();
+        for oid in oids {
             input.push_str(oid);
             input.push('\n');
+            want.push(oid.to_string());
+        }
+        if want.is_empty() {
+            return Ok(Vec::new());
         }
         let mut cmd = self.command(["cat-file", "--batch"]);
         cmd.stdin(Stdio::piped())
@@ -413,19 +439,21 @@ impl Git {
         let mut child = cmd
             .spawn()
             .map_err(|e| Error::io("spawning git cat-file", e))?;
-        {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| Error::Invalid("cat-file stdin".into()))?;
+        let writer = std::thread::spawn(move || {
             use std::io::Write;
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| Error::Invalid("cat-file stdin".into()))?;
-            stdin
-                .write_all(input.as_bytes())
-                .map_err(|e| Error::io("writing to git cat-file", e))?;
-        }
+            stdin.write_all(input.as_bytes())
+        });
         let out = child
             .wait_with_output()
             .map_err(|e| Error::io("git cat-file", e))?;
+        writer
+            .join()
+            .map_err(|_| Error::Invalid("cat-file writer panicked".into()))?
+            .map_err(|e| Error::io("writing to git cat-file", e))?;
         if !out.status.success() {
             return Err(Error::Git {
                 args: "cat-file --batch".into(),
@@ -433,7 +461,7 @@ impl Git {
                 stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
             });
         }
-        parse_batch(&out.stdout, blobs)
+        parse_batch(&out.stdout, &want)
     }
 
     /// Squash-merge `commit` into the current (clean) worktree and leave the
@@ -512,9 +540,16 @@ fn split_z(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
-fn parse_batch(mut out: &[u8], blobs: Vec<(String, String)>) -> Result<Vec<(String, Vec<u8>)>> {
-    let mut files = Vec::with_capacity(blobs.len());
-    for (path, oid) in blobs {
+#[derive(Debug, Clone)]
+pub struct TreeBlob {
+    pub path: String,
+    pub oid: String,
+    pub size: u64,
+}
+
+fn parse_batch(mut out: &[u8], oids: &[String]) -> Result<Vec<Vec<u8>>> {
+    let mut files = Vec::with_capacity(oids.len());
+    for oid in oids {
         let nl = out
             .iter()
             .position(|b| *b == b'\n')
@@ -535,7 +570,7 @@ fn parse_batch(mut out: &[u8], blobs: Vec<(String, String)>) -> Result<Vec<(Stri
         if out.len() < end + 1 {
             return Err(Error::Invalid("truncated cat-file body".into()));
         }
-        files.push((path, out[start..end].to_vec()));
+        files.push(out[start..end].to_vec());
         out = &out[end + 1..];
     }
     Ok(files)
@@ -604,6 +639,39 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::testing::TempRepo;
+
+    #[test]
+    fn reading_many_blobs_does_not_deadlock_on_full_pipes() {
+        // ~3000 ids (> 64 KiB of stdin) and > 64 KiB of output: the old
+        // write-everything-then-read code hung here.
+        let files: Vec<(String, String)> = (0..3000)
+            .map(|i| {
+                (
+                    format!("f/{i}.txt"),
+                    format!("file number {i} {}\n", "x".repeat(40)),
+                )
+            })
+            .collect();
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, c)| (p.as_str(), c.as_str()))
+            .collect();
+        let repo = TempRepo::new(&refs);
+        let git = repo.git();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let root = repo.root.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(super::Git::new(&root).files_at("HEAD", "f"));
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("files_at finished instead of deadlocking")
+            .expect("files");
+        assert_eq!(got.len(), 3000);
+        let one = got.iter().find(|(p, _)| p == "f/7.txt").expect("f/7");
+        assert!(String::from_utf8_lossy(&one.1).starts_with("file number 7 "));
+        assert_eq!(git.tree_blobs("HEAD", "").expect("blobs").len(), 3000);
+    }
 
     #[test]
     fn worktree_tree_sees_untracked_and_leaves_index_alone() {
