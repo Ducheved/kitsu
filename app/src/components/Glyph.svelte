@@ -1,12 +1,11 @@
 <script lang="ts">
+  import { t } from "../lib/i18n/index.svelte";
   import type { Attention, Status } from "../lib/types";
 
   let { attention, status, size = 14 }: { attention: Attention; status?: Status; size?: number } = $props();
 
   const failing = $derived(status?.kind === "failed" || status?.kind === "interrupted" || (status?.kind === "review" && status.verdict === "failing"));
-  const label = $derived(
-    { needs_you: "needs you", working: "working", ready: "ready", waiting: "waiting", quiet: "done" }[attention],
-  );
+  const label = $derived(t(`attention.${attention}`));
 </script>
 
 <svg class="glyph {attention}" class:failing width={size} height={size} viewBox="0 0 16 16" role="img" aria-label={label}>

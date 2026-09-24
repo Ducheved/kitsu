@@ -1,23 +1,57 @@
 <script lang="ts">
   import { app } from "../lib/app.svelte";
+  import { type Key, t } from "../lib/i18n/index.svelte";
 
-  const groups: [string, [string, string][]][] = [
-    ["Anywhere", [["⌘K  or  :", "commands, tasks, files"], ["⌘P", "open a file"], ["n", "new task"], ["g r", "rules"], ["g h", "home"], ["?", "this"], ["Esc", "close / back"]]],
-    ["Task list", [["j  k", "move"], ["⏎  o", "open"], ["/", "filter"]]],
-    ["On a task", [["r", "start the agent"], ["s", "stop it"], ["1 2", "answer its question"], ["a", "accept and close"], ["c", "continue with a note"], ["x", "discard the attempt"]]],
-    ["Editor", [[":w  :q  :e path", "vim ex commands"], ["⌘S", "save (vim off)"]]],
+  const groups: [Key, [string, Key][]][] = [
+    [
+      "help.anywhere",
+      [
+        ["⌘K  :", "help.commands"],
+        ["⌘P", "help.openFile"],
+        ["n", "help.newTask"],
+        ["g r", "help.rules"],
+        ["g h", "help.home"],
+        ["⌘1  ⌘2", "help.layouts"],
+        ["⌘,", "help.settings"],
+        ["?", "help.this"],
+        ["Esc", "help.back"],
+      ],
+    ],
+    ["help.list", [["j  k", "help.move"], ["⏎  o", "help.open"], ["/", "help.filter"]]],
+    [
+      "help.task",
+      [
+        ["r", "help.start"],
+        ["s", "help.stop"],
+        ["1 2", "help.answer"],
+        ["a", "help.accept"],
+        ["c", "help.continue"],
+        ["x", "help.discard"],
+      ],
+    ],
+    [
+      "help.code",
+      [
+        ["⌘B", "help.toggleTree"],
+        ["⌘J", "help.toggleStrip"],
+        ["⌃⇥  :bn  :bp", "help.tabs"],
+        [":bd", "help.closeTab"],
+        ["j k h l ⏎", "help.treeKeys"],
+      ],
+    ],
+    ["help.editor", [[":w  :q  :e path", "help.ex"], ["⌘S", "help.save"]]],
   ];
 </script>
 
 <div class="scrim" role="presentation" onclick={() => (app.overlay = null)}>
-  <div class="help" role="dialog" aria-label="Keyboard shortcuts" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === "Escape" && (app.overlay = null)}>
-    <h2>Keys</h2>
+  <div class="help" role="dialog" aria-label={t("cmd.keys")} tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === "Escape" && (app.overlay = null)}>
+    <h2>{t("help.title")}</h2>
     <div class="cols">
       {#each groups as [title, keys] (title)}
         <section>
-          <h3>{title}</h3>
+          <h3>{t(title)}</h3>
           {#each keys as [k, what] (k)}
-            <div class="k"><span class="mono key">{k}</span><span>{what}</span></div>
+            <div class="k"><span class="mono key">{k}</span><span>{t(what)}</span></div>
           {/each}
         </section>
       {/each}
@@ -31,7 +65,7 @@
           app.savePrefs();
         }}
       />
-      Vim keys in the editor
+      {t("settings.vim")}
     </label>
   </div>
 </div>

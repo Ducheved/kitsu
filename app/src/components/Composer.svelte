@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { app } from "../lib/app.svelte";
   import { api, errorText } from "../lib/api";
+  import { t } from "../lib/i18n/index.svelte";
 
   let title = $state("");
   let body = $state("");
@@ -39,16 +40,16 @@
 </script>
 
 <div class="scrim" role="presentation" onclick={() => (app.overlay = null)}>
-  <div class="sheet" role="dialog" aria-label="New task" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={key}>
-    <input bind:this={titleInput} class="title" placeholder="What needs to happen?" bind:value={title} onkeydown={(e) => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), create())} />
-    <textarea class="body" rows="5" placeholder="Why, and what done looks like. The agent reads this first." bind:value={body}></textarea>
+  <div class="sheet" role="dialog" aria-label={t("cmd.new")} tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={key}>
+    <input bind:this={titleInput} class="title" placeholder={t("new.title")} bind:value={title} onkeydown={(e) => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), create())} />
+    <textarea class="body" rows="5" placeholder={t("new.body")} bind:value={body}></textarea>
     <label class="scope">
-      <span class="hint">Scope</span>
-      <input class="field mono" placeholder="src/payments/**, api/charge.py  (rules that cover these paths get attached)" bind:value={scope} />
+      <span class="hint">{t("new.scope")}</span>
+      <input class="field mono" placeholder={t("new.scopePlaceholder")} bind:value={scope} />
     </label>
     <div class="foot">
-      <span class="hint">Saved as a file in .kitsu/tasks/. Add checks there or in kitsu.toml.</span>
-      <button class="btn primary" disabled={!title.trim() || busy} onclick={create}>Create <kbd>⏎</kbd></button>
+      <span class="hint">{t("new.foot")}</span>
+      <button class="btn primary" disabled={!title.trim() || busy} onclick={create}>{t("new.create")} <kbd>⏎</kbd></button>
     </div>
   </div>
 </div>

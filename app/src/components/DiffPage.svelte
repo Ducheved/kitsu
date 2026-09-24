@@ -6,6 +6,7 @@
   import { app } from "../lib/app.svelte";
   import { api, errorText } from "../lib/api";
   import { base } from "../lib/editor";
+  import { t } from "../lib/i18n/index.svelte";
   import type { FileDiff } from "../lib/types";
 
   let { run, path }: { run: string; path: string } = $props();
@@ -18,6 +19,8 @@
   $effect(() => {
     const r = run;
     const p = path;
+    const dark = app.dark;
+    const vim = app.prefs.vim;
     api
       .fileDiff(r, p)
       .then((d) => {
@@ -29,7 +32,7 @@
           state: EditorState.create({
             doc: d.new ?? "",
             extensions: [
-              base(p, { vim: app.prefs.vim, readOnly: true }),
+              base(p, { vim, dark, readOnly: true }),
               EditorState.readOnly.of(true),
               unifiedMergeView({ original: d.old ?? "", mergeControls: false, gutter: true }),
             ],
@@ -46,11 +49,11 @@
   <header>
     <button class="btn quiet" onclick={() => app.goBack()}>←</button>
     <span class="mono path">{path}</span>
-    {#if diff?.old === null}<span class="pill ok">new file</span>{/if}
-    {#if diff?.new === null}<span class="pill bad">deleted</span>{/if}
-    {#if diff?.protected}<span class="pill warn">rules / protected</span>{/if}
+    {#if diff?.old === null}<span class="pill ok">{t("diff.newFile")}</span>{/if}
+    {#if diff?.new === null}<span class="pill bad">{t("diff.deleted")}</span>{/if}
+    {#if diff?.protected}<span class="pill warn">{t("review.protected")}</span>{/if}
     <span class="spacer"></span>
-    <span class="hint mono">run {run}</span>
+    <span class="hint mono">{t("diff.run", { run })}</span>
   </header>
   {#if error}<div class="err tone-bad">{error}</div>{/if}
   <div class="host" bind:this={host}></div>

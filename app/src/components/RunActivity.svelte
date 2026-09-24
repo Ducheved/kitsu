@@ -1,7 +1,8 @@
 <script lang="ts">
   import { app } from "../lib/app.svelte";
   import { api, errorText } from "../lib/api";
-  import { ago, duration } from "../lib/format";
+  import { i18n, t } from "../lib/i18n/index.svelte";
+  import { duration } from "../lib/status";
   import { render } from "../lib/md";
   import type { Evidence, Run, RunEvent } from "../lib/types";
 
@@ -81,31 +82,33 @@
           }
           break;
         case "permission":
-          out.push({ type: "note", key: `n${e.seq}`, text: `allowed “${b.title}” (${b.by})`, tone: "dim" });
+          out.push({ type: "note", key: `n${e.seq}`, text: t("act.allowed", { title: String(b.title ?? ""), by: String(b.by ?? "") }), tone: "dim" });
           break;
         case "ask.open":
-          out.push({ type: "note", key: `n${e.seq}`, text: `asked you: ${b.request?.title}`, tone: "warn" });
+          out.push({ type: "note", key: `n${e.seq}`, text: t("act.asked", { title: String(b.request?.title ?? "") }), tone: "warn" });
           break;
         case "ask.answered":
-          out.push({ type: "note", key: `n${e.seq}`, text: `you answered: ${b.answer}`, tone: "dim" });
+          out.push({ type: "note", key: `n${e.seq}`, text: t("act.answered", { answer: String(b.answer ?? "") }), tone: "dim" });
           break;
         case "check.done":
-          out.push({ type: "note", key: `n${e.seq}`, text: `check ${b.check}: ${b.outcome}`, tone: b.outcome === "pass" ? "ok" : "bad" });
+          out.push({ type: "note", key: `n${e.seq}`, text: t("act.check", { check: String(b.check), outcome: outcome(String(b.outcome)) }), tone: b.outcome === "pass" ? "ok" : "bad" });
           break;
         case "protocol.duplicate_response":
         case "protocol.violation":
-          out.push({ type: "note", key: `n${e.seq}`, text: e.kind === "protocol.violation" ? `agent broke the protocol: ${b.detail}` : "agent answered the same request twice (ignored)", tone: "bad" });
+          out.push({ type: "note", key: `n${e.seq}`, text: e.kind === "protocol.violation" ? t("act.protocol", { detail: String(b.detail ?? "") }) : t("act.duplicate"), tone: "bad" });
           break;
         case "run.state":
-          if (b.to === "stopping") out.push({ type: "note", key: `n${e.seq}`, text: "stop requested", tone: "dim" });
-          if (b.to === "failed") out.push({ type: "note", key: `n${e.seq}`, text: `failed: ${b.detail ?? ""}`, tone: "bad" });
-          if (b.to === "interrupted") out.push({ type: "note", key: `n${e.seq}`, text: "interrupted: the process that owned this run went away", tone: "warn" });
+          if (b.to === "stopping") out.push({ type: "note", key: `n${e.seq}`, text: t("act.stopRequested"), tone: "dim" });
+          if (b.to === "failed") out.push({ type: "note", key: `n${e.seq}`, text: t("act.failed", { detail: String(b.detail ?? "") }), tone: "bad" });
+          if (b.to === "interrupted") out.push({ type: "note", key: `n${e.seq}`, text: t("act.interrupted"), tone: "warn" });
           break;
       }
     }
     return compact ? out.slice(-6) : out;
   });
 
+  const outcome = (o: string) => (o === "pass" || o === "fail" || o === "timeout" || o === "error" ? t(`outcome.${o}`) : o);
+  const toolStatus = (s: string) => (s === "pending" || s === "in_progress" || s === "failed" ? t(`tool.${s}`) : s.replace("_", " "));
   const toolIcon: Record<string, string> = { read: "◇", search: "⌕", edit: "✎", delete: "✕", move: "↦", execute: "›_", fetch: "⇣", think: "…", other: "•" };
 </script>
 
@@ -113,7 +116,7 @@
   {#if error}<div class="err">{error}</div>{/if}
   {#if run}
     <div class="meta hint">
-      {run.agent} · started {ago(run.created_at)}{#if run.ended_at} · took {duration(run.ended_at - run.created_at)}{/if}{#if run.note} · note: “{run.note}”{/if}
+      {t("act.started", { agent: run.agent, ago: i18n.ago(run.created_at) })}{#if run.ended_at}{t("act.took", { duration: duration(run.ended_at - run.created_at) })}{/if}{#if run.note}{t("act.note", { note: run.note })}{/if}
     </div>
   {/if}
   <div class="rows scroll" bind:this={box}>
@@ -124,7 +127,7 @@
         <div class="tool {r.status}">
           <span class="icon mono">{toolIcon[r.kind] ?? "•"}</span>
           <span class="t">{r.title}</span>
-          <span class="st">{r.status === "completed" ? "" : r.status.replace("_", " ")}</span>
+          <span class="st">{r.status === "completed" ? "" : toolStatus(r.status)}</span>
         </div>
       {:else if r.type === "plan"}
         <ul class="plan">
@@ -139,12 +142,12 @@
     {#if live && run && !run.ended_at}
       <div class="alive"><span></span><span></span><span></span></div>
     {/if}
-    {#if !rows.length && !live}<div class="hint">No activity recorded.</div>{/if}
+    {#if !rows.length && !live}<div class="hint">{t("act.none")}</div>{/if}
   </div>
   {#if evidence.length && !compact}
     <div class="checks">
       {#each evidence as e (e.id)}
-        <span class="pill {e.outcome === 'pass' ? 'ok' : 'bad'}" title={e.command}>{e.check_name} {e.outcome === "pass" ? "passes" : e.outcome} · {duration(e.duration_ms)}</span>
+        <span class="pill {e.outcome === 'pass' ? 'ok' : 'bad'}" title={e.command}>{e.check_name} {outcome(e.outcome)} · {duration(e.duration_ms)}</span>
       {/each}
     </div>
   {/if}

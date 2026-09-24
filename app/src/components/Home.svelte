@@ -1,12 +1,14 @@
 <script lang="ts">
   import { app } from "../lib/app.svelte";
   import { api, errorText } from "../lib/api";
+  import { t } from "../lib/i18n/index.svelte";
+  import { statusText } from "../lib/status";
   import Glyph from "./Glyph.svelte";
 
   const ov = $derived(app.overview);
-  const needs = $derived((ov?.tasks ?? []).filter((t) => t.attention === "needs_you"));
-  const working = $derived((ov?.tasks ?? []).filter((t) => t.attention === "working"));
-  const ready = $derived((ov?.tasks ?? []).filter((t) => t.attention === "ready"));
+  const needs = $derived((ov?.tasks ?? []).filter((x) => x.attention === "needs_you"));
+  const working = $derived((ov?.tasks ?? []).filter((x) => x.attention === "working"));
+  const ready = $derived((ov?.tasks ?? []).filter((x) => x.attention === "ready"));
 
   async function trust() {
     try {
@@ -30,47 +32,49 @@
 <div class="home">
   {#if app.loadError}
     <div class="card">
-      <h1>Can't open this folder</h1>
+      <h1>{t("home.cantOpen")}</h1>
       <p class="tone-bad">{app.loadError}</p>
-      <p class="hint">Start Kitsu from inside a git repository, or pass its path: <span class="mono">kitsu-app ~/code/project</span>.</p>
+      <p class="hint">{t("home.cantOpenHint")} <span class="mono">kitsu-app ~/code/project</span></p>
     </div>
   {:else if ov && !ov.repo.initialized}
     <div class="card">
-      <h1>Set up {ov.repo.name}</h1>
-      <p>Kitsu keeps tasks, rules and decisions as small files in <span class="mono">.kitsu/</span>, next to your code, versioned with it.</p>
-      <button class="btn primary" onclick={init}>Create .kitsu/</button>
+      <h1>{t("home.setup", { name: ov.repo.name })}</h1>
+      <p>{t("home.setupBody")}</p>
+      <button class="btn primary" onclick={init}>{t("home.create")}</button>
     </div>
   {:else if ov}
     {#if !ov.repo.trusted}
       <div class="card trust">
-        <strong>Trust this repository?</strong>
-        <span>Agents and checks run code from it (tests, build scripts). Until you say so, Kitsu won't run anything.</span>
-        <button class="btn" onclick={trust}>Trust {ov.repo.name}</button>
+        <strong>{t("home.trustTitle")}</strong>
+        <span>{t("home.trustBody")}</span>
+        <button class="btn" onclick={trust}>{t("home.trust", { name: ov.repo.name })}</button>
       </div>
     {/if}
     {#each ov.problems as p (p.path)}
-      <div class="card problem"><strong class="tone-bad">Can't read {p.path}.</strong> {p.detail}. Whatever rule it holds is not being enforced or shown to agents.</div>
+      <div class="card problem tone-bad">{t("home.problem", { path: p.path, detail: p.detail })}</div>
     {/each}
 
     <h1 class="calm">
-      {#if needs.length}{needs.length === 1 ? "One thing needs you." : `${needs.length} things need you.`}{:else if working.length}Nothing needs you right now.{:else}All quiet.{/if}
+      {#if needs.length}{t("home.needs", { n: needs.length })}{:else if working.length}{t("home.nothingNow")}{:else}{t("home.quiet")}{/if}
     </h1>
     <p class="sub">
-      {#if working.length}{working.length} agent{working.length === 1 ? " is" : "s are"} working.{/if}
-      {#if ready.length}{ready.length} task{ready.length === 1 ? "" : "s"} ready to start.{/if}
+      {#if working.length}{t("home.agentsWorking", { n: working.length })}{/if}
+      {#if ready.length}{t("home.tasksReady", { n: ready.length })}{/if}
     </p>
 
     <div class="list">
-      {#each [...needs, ...working, ...ready.slice(0, 3)] as t (t.id)}
-        <button class="row" onclick={() => app.openTask(t.id)}>
-          <Glyph attention={t.attention} status={t.status} />
-          <span class="t">{t.title}</span>
-          <span class="hint">{t.reason}</span>
+      {#each [...needs, ...working, ...ready.slice(0, 3)] as task (task.id)}
+        <button class="row" onclick={() => app.openTask(task.id)}>
+          <Glyph attention={task.attention} status={task.status} />
+          <span class="title">{task.title}</span>
+          <span class="hint">{statusText(task)}</span>
         </button>
       {/each}
     </div>
 
-    <p class="keys hint"><kbd>j</kbd><kbd>k</kbd> to move, <kbd>⏎</kbd> to open, <kbd>n</kbd> for a new task, <kbd>⌘K</kbd> for everything else.</p>
+    <p class="keys hint">
+      <kbd>j</kbd><kbd>k</kbd> {t("home.keyMove")} <kbd>⏎</kbd> {t("home.keyOpen")} <kbd>n</kbd> {t("home.keyNew")} <kbd>⌘K</kbd> {t("home.keyAll")}
+    </p>
   {/if}
 </div>
 
@@ -122,7 +126,7 @@
   .row:hover {
     background: var(--hover);
   }
-  .t {
+  .title {
     font-weight: 500;
   }
   .row .hint {

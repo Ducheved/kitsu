@@ -7,11 +7,11 @@ export type Attention = "needs_you" | "working" | "ready" | "waiting" | "quiet";
 export type Verdict = "verified" | "failing" | "unverified" | "empty" | "unknown";
 
 export type Status =
-  | { kind: "running"; run: string; stopping: boolean }
-  | { kind: "asking"; run: string; asks: number }
-  | { kind: "review"; run: string; verdict: Verdict }
-  | { kind: "failed"; run: string; detail: string }
-  | { kind: "interrupted"; run: string }
+  | { kind: "running"; run: string; agent: string; stopping: boolean }
+  | { kind: "asking"; run: string; agent: string; asks: number }
+  | { kind: "review"; run: string; agent: string; verdict: Verdict; failing: string[] }
+  | { kind: "failed"; run: string; agent: string; detail: string }
+  | { kind: "interrupted"; run: string; agent: string }
   | { kind: "blocked_by_question"; questions: string[] }
   | { kind: "blocked_by_tasks"; tasks: string[] }
   | { kind: "ready" }
@@ -25,6 +25,7 @@ export interface TaskView {
   attention: Attention;
   reason: string;
   path: string;
+  others: number;
 }
 
 export interface Repo {
@@ -54,6 +55,8 @@ export interface DigestItem {
   run: string | null;
   task: string | null;
   text: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  params: any;
 }
 
 export interface Digest {
@@ -75,7 +78,7 @@ export interface Overview {
   since: Digest;
   agents: Agent[];
   problems: { path: string; detail: string }[];
-  counts: { invariants: number; decisions: number; open_questions: number; checks: number };
+  counts: { invariants: number; decisions: number; open_questions: number; checks: number; memory?: number };
 }
 
 export type RunState = "starting" | "running" | "stopping" | "finished" | "failed" | "interrupted";
@@ -215,6 +218,6 @@ export interface Command {
   id: string;
   title: string;
   hint?: string;
-  group: string;
+  group: "commands" | "tasks" | "files";
   run: () => void;
 }

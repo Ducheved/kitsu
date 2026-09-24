@@ -2,6 +2,8 @@
   import { onMount } from "svelte";
   import { app } from "../lib/app.svelte";
   import { api } from "../lib/api";
+  import { t } from "../lib/i18n/index.svelte";
+  import { statusText } from "../lib/status";
   import type { Command } from "../lib/types";
 
   let { commands, files = false }: { commands: Command[]; files?: boolean } = $props();
@@ -19,18 +21,18 @@
   // Subsequence match with a small bonus for word starts and contiguity.
   function score(text: string, q: string): number {
     if (!q) return 1;
-    const t = text.toLowerCase();
+    const hay = text.toLowerCase();
     let ti = 0;
     let s = 0;
     let run = 0;
     for (const ch of q.toLowerCase()) {
-      const at = t.indexOf(ch, ti);
+      const at = hay.indexOf(ch, ti);
       if (at < 0) return 0;
       run = at === ti ? run + 1 : 0;
-      s += 1 + run * 2 + (at === 0 || /[\s/_.-]/.test(t[at - 1] ?? "") ? 3 : 0);
+      s += 1 + run * 2 + (at === 0 || /[\s/_.-]/.test(hay[at - 1] ?? "") ? 3 : 0);
       ti = at + 1;
     }
-    return s - t.length * 0.01;
+    return s - hay.length * 0.01;
   }
 
   const items = $derived.by(() => {
@@ -39,12 +41,12 @@
       ? []
       : [
           ...commands,
-          ...(app.overview?.tasks ?? []).map((t) => ({ id: `task:${t.id}`, title: t.title, hint: t.reason, group: "Tasks", run: () => app.openTask(t.id) })),
+          ...(app.overview?.tasks ?? []).map((task) => ({ id: `task:${task.id}`, title: task.title, hint: statusText(task), group: "tasks" as const, run: () => app.openTask(task.id) })),
         ];
-    const fileItems: Command[] = fileList.map((f) => ({ id: `file:${f}`, title: f, group: "Files", run: () => app.go({ kind: "file", path: f }) }));
+    const fileItems: Command[] = fileList.map((f) => ({ id: `file:${f}`, title: f, group: "files" as const, run: () => app.go({ kind: "file", path: f }) }));
     const all = files || q ? [...pool, ...fileItems] : pool;
     return all
-      .map((c) => ({ c, s: score(c.title, q) + (c.group === "Commands" ? 0.5 : 0) }))
+      .map((c) => ({ c, s: score(c.title, q) + (c.group === "commands" ? 0.5 : 0) }))
       .filter((x) => x.s > 0)
       .sort((a, b) => b.s - a.s)
       .slice(0, 50)
@@ -82,17 +84,17 @@
 </script>
 
 <div class="scrim" role="presentation" onclick={() => (app.overlay = null)}>
-  <div class="palette" role="dialog" aria-label="Command palette" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
-    <input bind:this={input} class="q" placeholder={files ? "Open file" : "Type a command, a task or a file"} bind:value={query} onkeydown={key} />
+  <div class="palette" role="dialog" aria-label={t("group.commands")} tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+    <input bind:this={input} class="q" placeholder={files ? t("palette.files") : t("palette.placeholder")} bind:value={query} onkeydown={key} />
     <div class="results scroll" role="listbox">
       {#each items as c, i (c.id)}
-        {#if i === 0 || items[i - 1]?.group !== c.group}<div class="group">{c.group}</div>{/if}
+        {#if i === 0 || items[i - 1]?.group !== c.group}<div class="group">{t(`group.${c.group}`)}</div>{/if}
         <button class="item" class:on={i === index} role="option" aria-selected={i === index} onmouseenter={() => (index = i)} onclick={() => pick(c)}>
-          <span class="title" class:mono={c.group === "Files"}>{c.title}</span>
+          <span class="title" class:mono={c.group === "files"}>{c.title}</span>
           {#if c.hint}<span class="hint">{c.hint}</span>{/if}
         </button>
       {:else}
-        <div class="none hint">Nothing matches.</div>
+        <div class="none hint">{t("palette.none")}</div>
       {/each}
     </div>
   </div>

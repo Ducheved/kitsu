@@ -1,8 +1,9 @@
 <script lang="ts">
   import { app } from "../lib/app.svelte";
   import { api, errorText } from "../lib/api";
-  import { ago, runWord } from "../lib/format";
+  import { i18n, t } from "../lib/i18n/index.svelte";
   import { inline, render } from "../lib/md";
+  import { runWord, statusText } from "../lib/status";
   import type { Ask, Run, TaskDetail } from "../lib/types";
   import Glyph from "./Glyph.svelte";
   import ReviewCard from "./ReviewCard.svelte";
@@ -45,14 +46,14 @@
   export async function start() {
     if (starting || !detail) return;
     if (!repo?.trusted) {
-      app.notify("Trust this repository first: agents and checks run its code.", "bad");
+      app.notify(t("start.untrusted"), "bad");
       return;
     }
     starting = true;
     try {
       await api.startRun(id, app.prefs.agent, app.prefs.policy, note);
       note = "";
-      app.notify(`${app.prefs.agent} is on it.`);
+      app.notify(t("start.onIt", { agent: app.prefs.agent }));
       app.changed();
     } catch (e) {
       app.notify(errorText(e), "bad");
@@ -64,7 +65,7 @@
   export async function stop() {
     if (status?.kind === "running" || status?.kind === "asking") {
       await api.stopRun(status.run).catch((e) => app.notify(errorText(e), "bad"));
-      app.notify("Asked the agent to stop.");
+      app.notify(t("start.stopAsked"));
     }
   }
 
@@ -93,7 +94,7 @@
     try {
       await api.answerQuestion(qid, a);
       answer[qid] = "";
-      app.notify("Answered. It's in the question file, so the next agent sees it.", "ok");
+      app.notify(t("question.answered"), "ok");
       app.changed();
     } catch (e) {
       app.notify(errorText(e), "bad");
@@ -107,13 +108,14 @@
   async function continueFrom(r: Run) {
     try {
       await api.startRun(id, app.prefs.agent, app.prefs.policy, note, r.id);
-      app.notify(`Continuing from ${r.id}.`);
+      app.notify(t("start.continuing", { run: r.id }));
     } catch (e) {
       app.notify(errorText(e), "bad");
     }
   }
 
-  const kindLabel: Record<string, string> = { invariant: "Must hold", decision: "Decision", question: "Question" };
+  const kindLabel = (k: string) =>
+    k === "invariant" ? t("kind.invariant") : k === "decision" ? t("kind.decision") : k === "question" ? t("kind.question") : k === "memory" ? t("kind.memory") : k === "code" ? t("kind.code") : k;
 </script>
 
 {#if error && !detail}
@@ -125,79 +127,79 @@
     {#if view}
       <div class="status">
         <Glyph attention={view.attention} status={view.status} />
-        <span>{view.reason}</span>
+        <span>{statusText(view)}</span>
       </div>
     {/if}
 
     <!-- The one thing to do next. -->
     <div class="action">
       {#if detail.task.state !== "open"}
-        <div class="card quiet-card">This task is {detail.task.state}. Its history is below.</div>
+        <div class="card quiet-card">{t(detail.task.state === "done" ? "task.isDone" : "task.isDropped")}</div>
       {:else if status?.kind === "asking"}
         {#each asks as ask (ask.id)}
           <div class="card ask">
-            <div class="ask-q"><strong>{statusRun?.agent ?? "The agent"}</strong> wants to: <strong>{@html inline(ask.request.title)}</strong></div>
+            <div class="ask-q">{t("ask.wants", { agent: statusRun?.agent ?? t("ask.theAgent") })} <strong>{@html inline(ask.request.title)}</strong></div>
             {#if ask.request.locations?.length}<div class="hint mono">{ask.request.locations.map((l) => l.path).join(", ")}</div>{/if}
             <div class="row">
               {#each ask.request.options as o, i (o.optionId)}
                 <button class="btn {o.kind?.startsWith('allow') ? 'primary' : ''}" onclick={() => reply(ask, o.optionId)}>{o.name ?? o.optionId} <kbd>{i + 1}</kbd></button>
               {/each}
             </div>
-            <div class="hint">This is an approval, not a sandbox: the agent runs with your user's permissions.</div>
+            <div class="hint">{t("ask.notSandbox")}</div>
           </div>
         {/each}
         {#if statusRun}<div class="card"><RunActivity runId={statusRun.id} live compact /></div>{/if}
       {:else if status?.kind === "running"}
         <div class="card">
           <div class="card-head">
-            <span class="pill work">{status.stopping ? "stopping" : "working"}</span>
-            <button class="btn" onclick={stop} disabled={status.stopping}>Stop <kbd>s</kbd></button>
+            <span class="pill work">{status.stopping ? t("run.stopping") : t("run.working")}</span>
+            <button class="btn" onclick={stop} disabled={status.stopping}>{t("run.stop")} <kbd>s</kbd></button>
           </div>
           <RunActivity runId={status.run} live />
         </div>
       {:else if status?.kind === "review" && statusRun}
         {#each detail.questions.filter((q) => q.open) as q (q.id)}
-          <div class="card open-q"><span class="pill warn">open question</span> {q.title} <span class="hint">It was asked about this task and isn't answered yet. Accepting now decides it by default.</span></div>
+          <div class="card open-q"><span class="pill warn">{t("question.open")}</span> {q.title} <span class="hint">{t("question.openReview")}</span></div>
         {/each}
         <ReviewCard bind:this={reviewCard} run={statusRun} taskId={id} />
       {:else if (status?.kind === "failed" || status?.kind === "interrupted") && statusRun}
         <div class="card">
           <div class="card-head">
-            <span class="pill bad">{status.kind === "failed" ? "failed" : "interrupted"}</span>
-            <span class="hint">{statusRun.agent} · {ago(statusRun.created_at)}</span>
+            <span class="pill bad">{status.kind === "failed" ? t("run.failed") : t("run.interrupted")}</span>
+            <span class="hint">{statusRun.agent} · {i18n.ago(statusRun.created_at)}</span>
           </div>
-          <p class="detail">{status.kind === "failed" ? status.detail : "Kitsu's worker for this run disappeared (crash or kill). What the agent did up to then is kept."}</p>
+          <p class="detail">{status.kind === "failed" ? status.detail : t("run.interruptedBody")}</p>
           <RunActivity runId={statusRun.id} compact />
           <div class="row">
-            {#if statusRun.snapshot}<button class="btn primary" onclick={() => continueFrom(statusRun)}>Continue from its work</button>{/if}
-            <button class="btn" onclick={start}>Start over</button>
+            {#if statusRun.snapshot}<button class="btn primary" onclick={() => continueFrom(statusRun)}>{t("run.continueFrom")}</button>{/if}
+            <button class="btn" onclick={start}>{t("run.startOver")}</button>
             <span class="spacer"></span>
-            <button class="btn quiet danger" onclick={() => discardRun(statusRun)}>Discard</button>
+            <button class="btn quiet danger" onclick={() => discardRun(statusRun)}>{t("run.discard")}</button>
           </div>
         </div>
       {:else if status?.kind === "blocked_by_question"}
         {#each detail.questions.filter((q) => q.open) as q (q.id)}
           <div class="card">
-            <div class="card-head"><span class="pill warn">open question</span></div>
+            <div class="card-head"><span class="pill warn">{t("question.open")}</span></div>
             <div class="q-title">{q.title}</div>
             {#if q.body.trim()}<div class="prose small">{@html render(q.body)}</div>{/if}
             <textarea
               class="field"
               rows="3"
-              placeholder="Your answer. It's written into the question file, so every future agent sees it."
+              placeholder={t("question.placeholder")}
               bind:value={answer[q.id]}
               onkeydown={(e) => {
                 if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) answerQuestion(q.id);
               }}
             ></textarea>
-            <div class="row"><button class="btn primary" onclick={() => answerQuestion(q.id)}>Answer <kbd>⌘⏎</kbd></button></div>
+            <div class="row"><button class="btn primary" onclick={() => answerQuestion(q.id)}>{t("question.answer")} <kbd>⌘⏎</kbd></button></div>
           </div>
         {/each}
       {:else if status?.kind === "blocked_by_tasks"}
         <div class="card">
-          Waits for
-          {#each status.tasks as t, i (t)}
-            <button class="link" onclick={() => app.openTask(t)}>{app.task(t)?.title ?? t}</button>{i < status.tasks.length - 1 ? ", " : ""}
+          {t("blocked.waitsFor")}
+          {#each status.tasks as dep, i (dep)}
+            <button class="link" onclick={() => app.openTask(dep)}>{app.task(dep)?.title ?? dep}</button>{i < status.tasks.length - 1 ? ", " : ""}
           {/each}.
         </div>
       {:else}
@@ -217,9 +219,9 @@
               >
             {/each}
           </div>
-          <textarea class="field" rows="2" placeholder="Anything to add for the agent? (optional — the task, rules and history are already in its brief)" bind:value={note}></textarea>
+          <textarea class="field" rows="2" placeholder={t("start.note")} bind:value={note}></textarea>
           <div class="row">
-            <button class="btn primary" disabled={starting} onclick={start}>Start {app.prefs.agent} <kbd>r</kbd></button>
+            <button class="btn primary" disabled={starting} onclick={start}>{t("start.start", { agent: app.prefs.agent })} <kbd>r</kbd></button>
             <label class="policy">
               <input
                 type="checkbox"
@@ -229,54 +231,54 @@
                   app.savePrefs();
                 }}
               />
-              Let it run commands in its worktree without asking
+              {t("start.auto")}
             </label>
           </div>
           {#if detail.dirty_checkout}
-            <div class="hint">You have uncommitted changes. The agent starts from your last commit and won't see them.</div>
+            <div class="hint">{t("start.dirty")}</div>
           {/if}
         </div>
       {/if}
     </div>
 
     {#if detail.task.body.trim()}
-      <div class="section-title">About</div>
+      <div class="section-title">{t("section.about")}</div>
       <div class="prose">{@html render(detail.task.body)}</div>
     {/if}
 
-    <div class="section-title">What the agent is told</div>
+    <div class="section-title">{t("section.told")}</div>
     <div class="constraints">
       {#if detail.task.checks.length}
-        <div class="c-row"><span class="c-kind">Done when</span><span>{#each detail.task.checks as c, i (c)}<code>{c}</code>{i < detail.task.checks.length - 1 ? ", " : ""}{/each} pass{detail.task.checks.length === 1 ? "es" : ""}, and you accept it</span></div>
+        <div class="c-row"><span class="c-kind">{t("told.doneWhen")}</span><span>{@html t("told.doneChecks", { checks: detail.task.checks.map((c) => `<code>${c.replace(/[<>&]/g, "")}</code>`).join(", ") })}</span></div>
       {:else}
-        <div class="c-row"><span class="c-kind">Done when</span><span>you accept it (no checks defined)</span></div>
+        <div class="c-row"><span class="c-kind">{t("told.doneWhen")}</span><span>{t("told.doneNoChecks")}</span></div>
       {/if}
       {#each constraints as c (c.kind + c.id)}
         <button class="c-row link-row" onclick={() => app.go({ kind: "rules" })}>
-          <span class="c-kind">{kindLabel[c.kind] ?? c.kind}</span>
+          <span class="c-kind">{kindLabel(c.kind)}</span>
           <span class="c-text"><span class="c-title">{c.title}</span><span class="hint mono"> {c.id}</span><span class="why hint">{c.why}</span></span>
         </button>
       {/each}
       {#each detail.brief.problems as p (p)}
-        <div class="c-row"><span class="c-kind tone-bad">Unreadable</span><span class="tone-bad">{p}</span></div>
+        <div class="c-row"><span class="c-kind tone-bad">{t("told.unreadable")}</span><span class="tone-bad">{p}</span></div>
       {/each}
       {#if detail.brief.omitted.length}
-        <div class="c-row"><span class="c-kind">Left out</span><span class="hint">{detail.brief.omitted.map((o) => o.id).join(", ")} (over budget; the agent can read them)</span></div>
+        <div class="c-row"><span class="c-kind">{t("told.leftOut")}</span><span class="hint">{t("told.leftOutBody", { ids: detail.brief.omitted.map((o) => o.id).join(", ") })}</span></div>
       {/if}
-      <button class="btn quiet show-brief" onclick={() => (showBrief = !showBrief)}>{showBrief ? "Hide" : "Show"} the full brief</button>
+      <button class="btn quiet show-brief" onclick={() => (showBrief = !showBrief)}>{showBrief ? t("told.hideBrief") : t("told.showBrief")}</button>
       {#if showBrief}<pre class="brief scroll">{detail.brief.markdown}</pre>{/if}
     </div>
 
     {#if history.length}
-      <div class="section-title">Earlier attempts</div>
+      <div class="section-title">{t("section.attempts")}</div>
       <div class="history">
         {#each history as r (r.id)}
           <div class="attempt">
             <button class="attempt-head" onclick={() => (openRun = openRun === r.id ? null : r.id)}>
               <span class="mono">{r.id}</span>
               <span>{r.agent}</span>
-              <span class="pill {r.resolution === 'accepted' ? 'ok' : r.state === 'failed' ? 'bad' : 'dim'}">{r.resolution ?? runWord(r.state, r.stop_reason)}</span>
-              <span class="hint">{ago(r.created_at)}</span>
+              <span class="pill {r.resolution === 'accepted' ? 'ok' : r.state === 'failed' ? 'bad' : 'dim'}">{runWord(r.state, r.stop_reason, r.resolution)}</span>
+              <span class="hint">{i18n.ago(r.created_at)}</span>
             </button>
             {#if openRun === r.id}
               <div class="attempt-body"><RunActivity runId={r.id} /></div>

@@ -189,22 +189,23 @@ const checkStatus = (name: string, runId?: string): CheckStatus => {
 };
 
 function view(t: MockTask): TaskView {
-  const base = { id: t.id, title: t.title, path: `.kitsu/tasks/${t.id}.md` };
+  const others = Math.max(0, runs.filter((r) => r.task === t.id && !r.resolution).length - 1);
+  const base = { id: t.id, title: t.title, path: `.kitsu/tasks/${t.id}.md`, others };
   if (t.state === "done") return { ...base, status: { kind: "done" }, attention: "quiet", reason: "done" };
   const open = runs.filter((r) => r.task === t.id && !r.resolution);
   const liveRun = open.find((r) => ["starting", "running", "stopping"].includes(r.state));
   if (liveRun) {
     const n = asks.filter((a) => a.run === liveRun.id && !a.answer).length;
-    if (n) return { ...base, status: { kind: "asking", run: liveRun.id, asks: n }, attention: "needs_you", reason: `${liveRun.agent} is waiting on a question from you` };
-    return { ...base, status: { kind: "running", run: liveRun.id, stopping: liveRun.state === "stopping" }, attention: "working", reason: `${liveRun.agent} is working on it` };
+    if (n) return { ...base, status: { kind: "asking", run: liveRun.id, agent: liveRun.agent, asks: n }, attention: "needs_you", reason: `${liveRun.agent} is waiting on a question from you` };
+    return { ...base, status: { kind: "running", run: liveRun.id, agent: liveRun.agent, stopping: liveRun.state === "stopping" }, attention: "working", reason: `${liveRun.agent} is working on it` };
   }
   const fin = open.find((r) => r.state === "finished");
   if (fin) {
     const failing = t.checks.concat(t.id === "bounded-retries" ? ["idempotency"] : []).filter((c) => checkStatus(c, fin.id).status !== "current");
-    return { ...base, status: { kind: "review", run: fin.id, verdict: failing.length ? "unverified" : "verified" }, attention: "needs_you", reason: failing.length ? "ready for review, not verified yet" : "ready for review, checks pass" };
+    return { ...base, status: { kind: "review", run: fin.id, agent: fin.agent, verdict: failing.length ? "unverified" : "verified", failing: [] }, attention: "needs_you", reason: failing.length ? "ready for review, not verified yet" : "ready for review, checks pass" };
   }
   const failed = open[0];
-  if (failed) return { ...base, status: { kind: "failed", run: failed.id, detail: failed.detail ?? "failed" }, attention: "needs_you", reason: `${failed.agent} failed: ${failed.detail}` };
+  if (failed) return { ...base, status: { kind: "failed", run: failed.id, agent: failed.agent, detail: failed.detail ?? "failed" }, attention: "needs_you", reason: `${failed.agent} failed: ${failed.detail}` };
   const q = questions.filter((q) => q.open && q.blocks.includes(t.id)).map((q) => q.id);
   if (q.length) return { ...base, status: { kind: "blocked_by_question", questions: q }, attention: "needs_you", reason: `blocked on ${q.join(", ")}` };
   const deps = t.after.filter((d) => tasks.find((x) => x.id === d)?.state === "open");
@@ -228,8 +229,8 @@ const handlers: Record<string, (a: Record<string, unknown>) => unknown> = {
       from_seq: seen,
       to_seq: seq,
       items: seen >= seq ? [] : [
-        { kind: "ask", run: asking.id, task: "metrics-export", text: "the agent asks: Run `pip install prometheus-client`" },
-        { kind: "finished", run: good.id, task: "bounded-retries", text: "finished, ready for review" },
+        { kind: "ask", run: asking.id, task: "metrics-export", text: "the agent asks: Run `pip install prometheus-client`", params: { title: "Run `pip install prometheus-client`" } },
+        { kind: "finished", run: good.id, task: "bounded-retries", text: "finished, ready for review", params: { stop_reason: "end_turn" } },
       ],
     },
     agents: [

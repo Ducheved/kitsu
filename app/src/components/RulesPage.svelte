@@ -1,7 +1,8 @@
 <script lang="ts">
   import { app } from "../lib/app.svelte";
   import { api, errorText } from "../lib/api";
-  import { checkWord } from "../lib/format";
+  import { i18n, t } from "../lib/i18n/index.svelte";
+  import { checkWord } from "../lib/status";
   import { render } from "../lib/md";
   import type { Rules } from "../lib/types";
 
@@ -27,7 +28,10 @@
     try {
       const out = await api.runChecks();
       const failed = out.filter((e) => e.outcome !== "pass");
-      app.notify(failed.length ? `${failed.length} of ${out.length} checks fail: ${failed.map((f) => f.check_name).join(", ")}` : `All ${out.length} checks pass.`, failed.length ? "bad" : "ok");
+      app.notify(
+        failed.length ? t("rules.someFail", { n: failed.length, total: out.length, names: i18n.list(failed.map((f) => f.check_name)) }) : t("rules.allPass", { n: out.length }),
+        failed.length ? "bad" : "ok",
+      );
       app.changed();
     } catch (e) {
       app.notify(errorText(e), "bad");
@@ -50,12 +54,12 @@
 </script>
 
 <article class="page">
-  <h1>Rules</h1>
-  <p class="lede">What has to stay true, what was decided, and what's still unknown. Agents get the ones that touch their task, with the reason. They live in <span class="mono">.kitsu/</span> and change through review like code.</p>
+  <h1>{t("rules.title")}</h1>
+  <p class="lede">{t("rules.lede")}</p>
   {#if error}<p class="tone-bad">{error}</p>{/if}
 
   {#if rules}
-    <div class="section-title">Must hold</div>
+    <div class="section-title">{t("rules.mustHold")}</div>
     {#each rules.invariants.filter((i) => i.active) as inv (inv.id)}
       <div class="item">
         <div class="item-head">
@@ -64,51 +68,51 @@
             {@const w = checkWord(c.status)}
             <span class="pill {w.tone}" title={w.hint ?? ""}>{c.name} {w.word}</span>
           {:else}
-            <span class="pill dim" title="No check enforces this. Reviewers and agents see it; nothing verifies it.">review only</span>
+            <span class="pill dim" title={t("rules.reviewOnlyHint")}>{t("rules.reviewOnly")}</span>
           {/each}
         </div>
         {#if inv.body.trim()}<div class="prose small">{@html render(inv.body)}</div>{/if}
-        <div class="hint mono">{inv.scope.length ? inv.scope.join(", ") : "whole repository"}{inv.decision ? ` · from ${inv.decision}` : ""}</div>
+        <div class="hint mono">{inv.scope.length ? inv.scope.join(", ") : t("rules.wholeRepo")}{inv.decision ? ` · ${t("rules.from", { decision: inv.decision })}` : ""}</div>
       </div>
     {:else}
-      <p class="hint">No invariants yet. They're for the things an agent will get wrong if nobody tells it: ownership, ordering, retry rules.</p>
+      <p class="hint">{t("rules.noInvariants")}</p>
     {/each}
 
-    <div class="section-title">Decisions</div>
+    <div class="section-title">{t("rules.decisions")}</div>
     {#each rules.decisions as d (d.id)}
       <div class="item">
-        <div class="item-head"><span class="item-title">{d.title}</span>{#if d.state !== "accepted"}<span class="pill {d.state === 'proposed' ? 'warn' : 'dim'}">{d.state}</span>{/if}</div>
+        <div class="item-head"><span class="item-title">{d.title}</span>{#if d.state !== "accepted"}<span class="pill {d.state === 'proposed' ? 'warn' : 'dim'}">{d.state === "proposed" ? t("rules.proposed") : d.state === "superseded" ? t("rules.superseded") : d.state}</span>{/if}</div>
         {#if d.body.trim()}<div class="prose small">{@html render(d.body)}</div>{/if}
         {#if d.rejected.length}
           <ul class="rejected">
-            {#each d.rejected as r (r)}<li><span class="no">not</span> {r}</li>{/each}
+            {#each d.rejected as r (r)}<li><span class="no">{t("rules.not")}</span> {r}</li>{/each}
           </ul>
         {/if}
       </div>
     {:else}
-      <p class="hint">No decisions recorded.</p>
+      <p class="hint">{t("rules.noDecisions")}</p>
     {/each}
 
     {#if rules.questions.length}
-      <div class="section-title">Questions</div>
+      <div class="section-title">{t("rules.questions")}</div>
       {#each rules.questions as q (q.id)}
         <div class="item">
-          <div class="item-head"><span class="item-title">{q.title}</span><span class="pill {q.open ? 'warn' : 'ok'}">{q.open ? "open" : "answered"}</span></div>
-          {#if q.answer}<div class="prose small"><strong>Answer:</strong> {q.answer}</div>{/if}
+          <div class="item-head"><span class="item-title">{q.title}</span><span class="pill {q.open ? 'warn' : 'ok'}">{q.open ? t("rules.open") : t("rules.answered")}</span></div>
+          {#if q.answer}<div class="prose small"><strong>{t("rules.answerLabel")}</strong> {q.answer}</div>{/if}
           {#if q.open}
             <div class="answer-row">
-              <input class="field" placeholder="Answer" bind:value={answers[q.id]} onkeydown={(e) => e.key === "Enter" && answer(q.id)} />
-              <button class="btn" onclick={() => answer(q.id)}>Answer</button>
+              <input class="field" placeholder={t("question.answer")} bind:value={answers[q.id]} onkeydown={(e) => e.key === "Enter" && answer(q.id)} />
+              <button class="btn" onclick={() => answer(q.id)}>{t("question.answer")}</button>
             </div>
           {/if}
-          {#if q.blocks.length}<div class="hint">blocks {q.blocks.join(", ")}</div>{/if}
+          {#if q.blocks.length}<div class="hint">{t("rules.blocks", { tasks: i18n.list(q.blocks) })}</div>{/if}
         </div>
       {/each}
     {/if}
 
     <div class="section-title checks-title">
-      <span>Checks</span>
-      <button class="btn" disabled={running} onclick={runChecks}>{running ? "Running…" : "Run all on your checkout"}</button>
+      <span>{t("rules.checks")}</span>
+      <button class="btn" disabled={running} onclick={runChecks}>{running ? t("rules.running") : t("rules.runAll")}</button>
     </div>
     {#each rules.checks as c (c.name)}
       {@const w = checkWord(c.status)}
@@ -118,7 +122,7 @@
         <span class="pill {w.tone}" title={w.hint ?? ""}>{w.word}</span>
       </div>
     {:else}
-      <p class="hint">No checks in <span class="mono">.kitsu/kitsu.toml</span>. Without checks, "done" means only that a human said so.</p>
+      <p class="hint">{t("rules.noChecks")}</p>
     {/each}
   {/if}
 </article>

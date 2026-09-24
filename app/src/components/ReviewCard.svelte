@@ -1,7 +1,8 @@
 <script lang="ts">
   import { app } from "../lib/app.svelte";
   import { api, errorKind, errorText } from "../lib/api";
-  import { checkWord } from "../lib/format";
+  import { t } from "../lib/i18n/index.svelte";
+  import { checkWord } from "../lib/status";
   import type { Accepted, Review, Run } from "../lib/types";
   import RunActivity from "./RunActivity.svelte";
 
@@ -37,13 +38,13 @@
   export async function accept(closeTask = true) {
     if (!review || busy || empty) return;
     if (needsApproval) {
-      app.notify("This change touches protected files. Look at them, then tick “I reviewed these”.", "info");
+      app.notify(t("review.approveFirst"), "info");
       return;
     }
     busy = "accept";
     try {
       result = await api.accept(run.id, closeTask, approved ? (review.approval_token ?? undefined) : undefined);
-      if (result.result === "applied") app.notify(closeTask ? "Accepted. Task closed." : "Accepted.", "ok");
+      if (result.result === "applied") app.notify(closeTask ? t("review.acceptedClosed") : t("review.accepted"), "ok");
     } catch (e) {
       app.notify(errorText(e), "bad");
     } finally {
@@ -56,7 +57,7 @@
     busy = "discard";
     try {
       await api.discard(run.id);
-      app.notify("Discarded.");
+      app.notify(t("review.discarded"));
     } catch (e) {
       app.notify(errorText(e), "bad");
     } finally {
@@ -74,9 +75,9 @@
       await api.startRun(taskId, app.prefs.agent, app.prefs.policy, note, run.id);
       noting = false;
       note = "";
-      app.notify(`Continuing with ${app.prefs.agent}.`);
+      app.notify(t("review.continuing", { agent: app.prefs.agent }));
     } catch (e) {
-      app.notify(errorKind(e) === "denied" ? errorText(e) : `Could not start: ${errorText(e)}`, "bad");
+      app.notify(errorKind(e) === "denied" ? errorText(e) : t("review.couldNotStart", { error: errorText(e) }), "bad");
     } finally {
       busy = "";
     }
@@ -87,20 +88,20 @@
   <div class="head">
     <div>
       <div class="title">
-        {run.agent} {run.stop_reason === "cancelled" ? "was stopped" : "finished"}
-        {#if review}<span class="hint">· {review.files.length} file{review.files.length === 1 ? "" : "s"} · <span class="tone-ok">+{total[0]}</span> <span class="tone-bad">−{total[1]}</span> · onto <span class="mono">{review.target}</span></span>{/if}
+        {t(run.stop_reason === "cancelled" ? "review.stopped" : "review.finished", { agent: run.agent })}
+        {#if review}<span class="hint">· {t("review.files", { n: review.files.length })} · <span class="tone-ok">+{total[0]}</span> <span class="tone-bad">−{total[1]}</span> · <span class="mono">{t("review.onto", { branch: review.target })}</span></span>{/if}
       </div>
       {#if empty}
-        <div class="verdict hint">It changed nothing. Nothing to accept; continue with a note or discard it.</div>
+        <div class="verdict hint">{t("review.empty")}</div>
       {:else if review && review.checks.length}
         <div class="verdict {allPass ? 'tone-ok' : anyFail ? 'tone-bad' : 'tone-warn'}">
-          {allPass ? "Every required check passes on this change." : anyFail ? "A required check fails. The agent's own summary doesn't count." : "Some required checks haven't run on this change yet."}
+          {allPass ? t("review.allPass") : anyFail ? t("review.fails") : t("review.pending")}
         </div>
       {:else if review}
-        <div class="verdict hint">No checks apply to this change. You're the only judge here.</div>
+        <div class="verdict hint">{t("review.noChecks")}</div>
       {/if}
     </div>
-    <button class="btn quiet" onclick={() => (showActivity = !showActivity)}>{showActivity ? "Hide" : "What it did"}</button>
+    <button class="btn quiet" onclick={() => (showActivity = !showActivity)}>{showActivity ? t("review.hide") : t("review.whatItDid")}</button>
   </div>
 
   {#if error}<div class="tone-bad">{error}</div>{/if}
@@ -114,8 +115,8 @@
       {#each review.files as f (f.path)}
         <button class="file" onclick={() => app.go({ kind: "diff", run: run.id, path: f.path })}>
           <span class="mono path">{f.path}</span>
-          {#if review.protected.includes(f.path)}<span class="pill warn">rules / protected</span>{/if}
-          <span class="n mono">{#if f.added === null}binary{:else}<span class="tone-ok">+{f.added}</span> <span class="tone-bad">−{f.removed}</span>{/if}</span>
+          {#if review.protected.includes(f.path)}<span class="pill warn">{t("review.protected")}</span>{/if}
+          <span class="n mono">{#if f.added === null}{t("review.binary")}{:else}<span class="tone-ok">+{f.added}</span> <span class="tone-bad">−{f.removed}</span>{/if}</span>
         </button>
       {/each}
     </div>
@@ -132,10 +133,7 @@
     {#if review.approval_token}
       <label class="approve">
         <input type="checkbox" bind:checked={approved} />
-        <span
-          >This change edits rules or protected files ({review.protected.join(", ")}). Checks are judged by the rules in <em>your</em> checkout,
-          not the agent's copy, but look at these yourself. <strong>I reviewed these.</strong></span
-        >
+        <span>{t("review.approve", { paths: review.protected.join(", ") })} <strong>{t("review.approveStrong")}</strong></span>
       </label>
     {/if}
   {/if}
@@ -143,32 +141,32 @@
   {#if result && result.result !== "applied"}
     <div class="outcome">
       {#if result.result === "conflict"}
-        <strong class="tone-bad">Conflicts with {review?.target}</strong> in {result.paths.join(", ")}. Continue on top of the current branch and let the agent resolve it.
+        <span class="tone-bad">{t("review.conflict", { branch: review?.target ?? "", paths: result.paths.join(", ") })}</span>
       {:else if result.result === "checks_failed"}
-        <strong class="tone-bad">Checks fail on the combined result</strong> ({result.failing.join(", ")}). It passed in its own worktree, but not together with what's on {review?.target} now.
+        <span class="tone-bad">{t("review.checksFailed", { checks: result.failing.join(", "), branch: review?.target ?? "" })}</span>
       {:else if result.result === "needs_approval"}
-        <strong class="tone-warn">Needs your approval</strong> for {result.paths.join(", ")}.
+        <span class="tone-warn">{t("review.needsApproval", { paths: result.paths.join(", ") })}</span>
       {/if}
     </div>
   {/if}
 
   {#if noting}
     <div class="continue">
-      <textarea class="field" rows="2" placeholder="What should the next attempt do differently? (optional)" bind:value={note}></textarea>
+      <textarea class="field" rows="2" placeholder={t("review.notePlaceholder")} bind:value={note}></textarea>
       <div class="row">
-        <button class="btn primary" disabled={busy !== ""} onclick={startContinue}>Continue with {app.prefs.agent}</button>
-        <button class="btn quiet" onclick={() => (noting = false)}>Cancel</button>
+        <button class="btn primary" disabled={busy !== ""} onclick={startContinue}>{t("review.continueWith", { agent: app.prefs.agent })}</button>
+        <button class="btn quiet" onclick={() => (noting = false)}>{t("review.cancel")}</button>
       </div>
     </div>
   {:else}
     <div class="actions">
       {#if !empty}
-        <button class="btn primary" disabled={!review || busy !== "" || needsApproval} onclick={() => accept(true)}>Accept and close task <kbd>a</kbd></button>
-        <button class="btn" disabled={!review || busy !== "" || needsApproval} onclick={() => accept(false)}>Accept, keep open</button>
+        <button class="btn primary" disabled={!review || busy !== "" || needsApproval} onclick={() => accept(true)}>{t("review.acceptClose")} <kbd>a</kbd></button>
+        <button class="btn" disabled={!review || busy !== "" || needsApproval} onclick={() => accept(false)}>{t("review.acceptKeep")}</button>
       {/if}
-      <button class="btn" disabled={busy !== ""} onclick={continueWork}>Continue… <kbd>c</kbd></button>
+      <button class="btn" disabled={busy !== ""} onclick={continueWork}>{t("review.continue")} <kbd>c</kbd></button>
       <span class="spacer"></span>
-      <button class="btn quiet danger" disabled={busy !== ""} onclick={discard}>Discard <kbd>x</kbd></button>
+      <button class="btn quiet danger" disabled={busy !== ""} onclick={discard}>{t("review.discard")} <kbd>x</kbd></button>
     </div>
   {/if}
 </div>

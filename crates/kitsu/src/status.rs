@@ -44,24 +44,31 @@ pub enum Attention {
 pub enum Status {
     Running {
         run: String,
+        agent: String,
         stopping: bool,
     },
     /// The running agent is waiting for a human answer.
     Asking {
         run: String,
+        agent: String,
         asks: usize,
     },
     /// An attempt finished and nobody accepted or discarded it yet.
     Review {
         run: String,
+        agent: String,
         verdict: Verdict,
+        /// Required checks that fail on the snapshot.
+        failing: Vec<String>,
     },
     Failed {
         run: String,
+        agent: String,
         detail: String,
     },
     Interrupted {
         run: String,
+        agent: String,
     },
     BlockedByQuestion {
         questions: Vec<String>,
@@ -98,6 +105,9 @@ pub struct TaskView {
     /// One line a person can read without knowing the model.
     pub reason: String,
     pub path: String,
+    /// Other attempts nobody accepted or discarded yet (for a done task: all
+    /// of them). Structured so a UI can say it in any language.
+    pub others: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -204,6 +214,13 @@ impl Snapshot<'_> {
         for task in self.intent.tasks.values() {
             let runs = open.get(&task.id).unwrap_or(&none);
             let (status, attention, reason) = self.classify(task, runs, &asks)?;
+            let others = match status {
+                Status::Done | Status::Dropped => runs.len(),
+                Status::Running { .. } | Status::Asking { .. } | Status::Review { .. } => {
+                    runs.len().saturating_sub(1)
+                }
+                _ => runs.len().saturating_sub(1),
+            };
             views.push(TaskView {
                 id: task.id.clone(),
                 title: task.title.clone(),
@@ -211,6 +228,7 @@ impl Snapshot<'_> {
                 attention,
                 reason,
                 path: task.source.path.clone(),
+                others,
             });
         }
         views.sort_by(|a, b| a.attention.cmp(&b.attention).then_with(|| a.id.cmp(&b.id)));
@@ -250,7 +268,11 @@ impl Snapshot<'_> {
                     format!("{n} questions")
                 };
                 return Ok((
-                    Status::Asking { run: id, asks: n },
+                    Status::Asking {
+                        run: id,
+                        agent: run.agent.clone(),
+                        asks: n,
+                    },
                     Attention::NeedsYou,
                     format!("{} is waiting on {what} from you", run.agent),
                 ));
@@ -263,7 +285,11 @@ impl Snapshot<'_> {
             };
             let reason = format!("{} {verb}{}", run.agent, others(runs.len() - 1));
             return Ok((
-                Status::Running { run: id, stopping },
+                Status::Running {
+                    run: id,
+                    agent: run.agent.clone(),
+                    stopping,
+                },
                 Attention::Working,
                 reason,
             ));
@@ -278,16 +304,16 @@ impl Snapshot<'_> {
         }
         if let Some((v, run, results)) = best {
             let more = others(runs.len() - 1);
+            let failing: Vec<String> = results
+                .iter()
+                .filter(|(_, s)| {
+                    matches!(s, CheckStatus::Current { outcome, .. } | CheckStatus::Carried { outcome, .. } if *outcome != crate::store::CheckOutcome::Pass)
+                })
+                .map(|(n, _)| n.clone())
+                .collect();
             let reason = match v {
                 Verdict::Verified => format!("ready for review, checks pass{more}"),
                 Verdict::Failing => {
-                    let failing: Vec<&str> = results
-                        .iter()
-                        .filter(|(_, s)| {
-                            matches!(s, CheckStatus::Current { outcome, .. } | CheckStatus::Carried { outcome, .. } if *outcome != crate::store::CheckOutcome::Pass)
-                        })
-                        .map(|(n, _)| n.as_str())
-                        .collect();
                     format!("ready for review, failing: {}{more}", failing.join(", "))
                 }
                 Verdict::Unverified => format!("ready for review, not verified yet{more}"),
@@ -297,7 +323,9 @@ impl Snapshot<'_> {
             return Ok((
                 Status::Review {
                     run: run.id.clone(),
+                    agent: run.agent.clone(),
                     verdict: v,
+                    failing,
                 },
                 Attention::NeedsYou,
                 reason,
@@ -308,7 +336,10 @@ impl Snapshot<'_> {
             let id = run.id.clone();
             if run.state == RunState::Interrupted {
                 return Ok((
-                    Status::Interrupted { run: id },
+                    Status::Interrupted {
+                        run: id,
+                        agent: run.agent.clone(),
+                    },
                     Attention::NeedsYou,
                     "run was interrupted; its partial work is kept".into(),
                 ));
@@ -316,7 +347,11 @@ impl Snapshot<'_> {
             let detail = run.detail.clone().unwrap_or_else(|| "agent failed".into());
             let reason = format!("{} failed: {detail}", run.agent);
             return Ok((
-                Status::Failed { run: id, detail },
+                Status::Failed {
+                    run: id,
+                    agent: run.agent.clone(),
+                    detail,
+                },
                 Attention::NeedsYou,
                 reason,
             ));

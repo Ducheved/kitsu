@@ -4,6 +4,7 @@
 // a "changed" signal bumps `tick`, and whoever is on screen re-reads.
 
 import { api, errorText, native, onChanged } from "./api";
+import { i18n, type Locale, systemLocale } from "./i18n/index.svelte";
 import type { Overview, TaskView } from "./types";
 
 export type View =
@@ -13,25 +14,35 @@ export type View =
   | { kind: "file"; path: string; line?: number }
   | { kind: "diff"; run: string; path: string };
 
-export type Overlay = null | "palette" | "help" | "new" | "files";
+export type Overlay = null | "palette" | "help" | "new" | "files" | "settings";
+export type Theme = "system" | "light" | "dark";
+export type Layout = "adaptive" | "work" | "code";
+export type Mode = "work" | "code";
 
 interface Prefs {
   vim: boolean;
   agent: string;
   policy: "ask" | "auto";
   showDone: boolean;
+  lang: Locale | "system";
+  theme: Theme;
+  layout: Layout;
+  tree: boolean;
+  strip: boolean;
 }
 
 const PREFS_KEY = "kitsu.prefs";
 
 function loadPrefs(): Prefs {
-  const d: Prefs = { vim: true, agent: "claude", policy: "ask", showDone: false };
+  const d: Prefs = { vim: true, agent: "claude", policy: "ask", showDone: false, lang: "system", theme: "system", layout: "adaptive", tree: true, strip: true };
   try {
     return { ...d, ...JSON.parse(localStorage.getItem(PREFS_KEY) ?? "{}") };
   } catch {
     return d;
   }
 }
+
+const darkQuery = typeof matchMedia === "undefined" ? null : matchMedia("(prefers-color-scheme: dark)");
 
 class App {
   overview = $state<Overview | null>(null);
@@ -43,12 +54,19 @@ class App {
   tick = $state(0);
   toast = $state<{ text: string; tone: "ok" | "bad" | "info" } | null>(null);
   prefs = $state<Prefs>(loadPrefs());
+  /** Which layout is on screen. With the adaptive layout it follows what you open. */
+  mode = $state<Mode>("work");
+  dark = $state(false);
   preview = !native;
   private refreshing = false;
   private again = false;
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
 
   async start() {
+    this.mode = this.prefs.layout === "code" ? "code" : "work";
+    this.applyTheme();
+    darkQuery?.addEventListener("change", () => this.applyTheme());
+    await i18n.use(this.prefs.lang === "system" ? systemLocale() : this.prefs.lang);
     try {
       await api.openRepo();
       await this.refresh();
@@ -56,6 +74,36 @@ class App {
       this.loadError = errorText(e);
     }
     await onChanged(() => this.changed());
+  }
+
+  applyTheme() {
+    const dark = this.prefs.theme === "dark" || (this.prefs.theme === "system" && !!darkQuery?.matches);
+    this.dark = dark;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  }
+
+  async setLang(lang: Locale | "system") {
+    this.prefs.lang = lang;
+    this.savePrefs();
+    await i18n.use(lang === "system" ? systemLocale() : lang);
+  }
+
+  setTheme(theme: Theme) {
+    this.prefs.theme = theme;
+    this.savePrefs();
+    this.applyTheme();
+  }
+
+  setLayout(layout: Layout) {
+    this.prefs.layout = layout;
+    this.savePrefs();
+    if (layout !== "adaptive") this.mode = layout;
+  }
+
+  /** Toggle between the two layouts by hand. */
+  setMode(mode: Mode) {
+    this.mode = mode;
+    if (this.prefs.layout !== "adaptive") this.setLayout(mode);
   }
 
   /** Coalesces bursts: at most one overview fetch in flight, one queued. */
@@ -88,12 +136,15 @@ class App {
   savePrefs() {
     try {
       localStorage.setItem(PREFS_KEY, JSON.stringify(this.prefs));
+      // theme.js reads this before first paint.
+      localStorage.setItem("kitsu.theme", this.prefs.theme);
     } catch {
       // Private mode or storage off: preferences just don't persist.
     }
   }
 
   go(v: View) {
+    if (this.prefs.layout === "adaptive") this.mode = v.kind === "file" ? "code" : "work";
     if (JSON.stringify(v) === JSON.stringify(this.view)) return;
     this.back.push(this.view);
     if (this.back.length > 50) this.back.shift();
@@ -103,8 +154,8 @@ class App {
 
   goBack() {
     const v = this.back.pop();
-    if (v) this.view = v;
-    else this.view = { kind: "home" };
+    this.view = v ?? { kind: "home" };
+    if (this.prefs.layout === "adaptive") this.mode = this.view.kind === "file" ? "code" : "work";
   }
 
   openTask(id: string) {
