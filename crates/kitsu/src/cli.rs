@@ -1530,7 +1530,7 @@ fn agents_cmd(json: bool) -> Result<()> {
     if json {
         let v: Vec<_> = list
             .iter()
-            .map(|a| json!({ "name": a.name, "command": a.command, "source": a.source }))
+            .map(|a| json!({ "name": a.name, "command": a.command, "source": a.source, "pass_env": a.pass_env, "env": a.env.keys().collect::<Vec<_>>(), "mcp": a.mcp }))
             .collect();
         println!("{}", json!(v));
     } else {
@@ -1541,6 +1541,13 @@ fn agents_cmd(json: bool) -> Result<()> {
                 a.command.join(" "),
                 paint(a.source, DIM)
             );
+            if !a.pass_env.is_empty() {
+                println!(
+                    "{:<10} {}",
+                    "",
+                    paint(&format!("also gets: {}", a.pass_env.join(" ")), DIM)
+                );
+            }
         }
     }
     Ok(())

@@ -74,6 +74,8 @@ struct Step {
     /// Call a tool on the first MCP server offered in `session/new` and say
     /// its text result: `mcp = { tool = "orient" }`.
     mcp: Option<McpCall>,
+    /// Say whether an environment variable is set: `env = "NAME"`.
+    env: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -321,6 +323,12 @@ impl Agent {
             if step.hang {
                 loop {
                     std::thread::sleep(Duration::from_secs(3600));
+                }
+            }
+            if let Some(name) = &step.env {
+                match std::env::var(name) {
+                    Ok(v) => self.say(&format!("env {name}={v}\n")),
+                    Err(_) => self.say(&format!("env {name} unset\n")),
                 }
             }
             if let Some(call) = &step.mcp {

@@ -869,3 +869,43 @@ mcp = { tool = "nope" }
         "{said}"
     );
 }
+
+#[test]
+fn agents_see_only_the_environment_they_are_allowed() {
+    let env = Env::new("agentenv");
+    let script = env.script(
+        "env",
+        "[[steps]]\nenv = \"HOST_SESSION_TOKEN\"\n[[steps]]\nenv = \"KITSU_TEST_SCRIPT\"\n[[steps]]\nenv = \"PATH\"\n",
+    );
+    let o = env
+        .cmd(&[
+            "run",
+            "bounded-retries",
+            "--agent",
+            "test",
+            "--id",
+            "renv",
+            "-q",
+            "--no-verify",
+        ])
+        .env("KITSU_TEST_SCRIPT", &script)
+        .env("HOST_SESSION_TOKEN", "do-not-leak")
+        .output()
+        .expect("run");
+    assert!(o.status.success());
+    let said: String = env
+        .store()
+        .run_events("renv", 0, 1000)
+        .expect("events")
+        .into_iter()
+        .filter(|e| e.kind == "agent.message")
+        .map(|e| e.body["text"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(said.contains("env HOST_SESSION_TOKEN unset"), "{said}");
+    assert!(!said.contains("do-not-leak"));
+    assert!(
+        said.contains("env KITSU_TEST_SCRIPT="),
+        "the agent's own pass_env gets through: {said}"
+    );
+    assert!(said.contains("env PATH="), "{said}");
+}

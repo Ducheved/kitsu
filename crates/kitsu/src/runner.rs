@@ -239,9 +239,12 @@ pub async fn drive(
         .split_first()
         .ok_or_else(|| Error::Invalid("empty agent command".into()))?;
     let mut cmd = Command::new(program);
+    // Not the whole environment: a host's tokens and session settings
+    // reached the agent that way (task agent-env).
+    cmd.env_clear()
+        .envs(crate::agents::agent_env(&opts.agent, std::env::vars()));
     cmd.args(args)
         .current_dir(&prep.worktree)
-        .envs(&opts.agent.env)
         .env("KITSU_RUN", id)
         .env("KITSU_TASK", &opts.task)
         .env("KITSU_BRIEF", &prep.brief_path)
