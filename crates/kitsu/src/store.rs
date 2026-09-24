@@ -503,7 +503,9 @@ impl Store {
             &tx,
             Some(r.id),
             "run.created",
-            &serde_json::json!({ "task": r.task, "agent": r.agent, "base": r.base }),
+            // The version lets recovery and review tell which rules (reducer,
+            // brief compiler) a run was started under.
+            &serde_json::json!({ "task": r.task, "agent": r.agent, "base": r.base, "kitsu_version": env!("CARGO_PKG_VERSION") }),
         )?;
         tx.commit()?;
         Ok(())
@@ -563,6 +565,38 @@ impl Store {
 
     /// The only way run state changes. Reads, reduces and writes in one
     /// transaction, so two processes racing on the same run cannot both win.
+    /// Differences between a run's stored state and its recorded
+    /// transitions: each `run.state` must start where the previous one
+    /// ended (from `starting`), and the last must end at the stored state.
+    /// Empty when consistent. A state written without going through
+    /// `apply_run_event` shows up here.
+    pub fn run_history_mismatches(&self, id: &str) -> Result<Vec<String>> {
+        let run = self.run(id)?;
+        let mut at = RunState::Starting.as_str().to_string();
+        let mut out = Vec::new();
+        for e in self.run_events(id, 0, usize::MAX)? {
+            if e.kind != "run.state" {
+                continue;
+            }
+            let from = e.body["from"].as_str().unwrap_or("?");
+            let to = e.body["to"].as_str().unwrap_or("?");
+            if from != at {
+                out.push(format!(
+                    "event {} moves from {from}, but the run was {at}",
+                    e.seq
+                ));
+            }
+            at = to.to_string();
+        }
+        if at != run.state.as_str() {
+            out.push(format!(
+                "stored state is {}, events end at {at}",
+                run.state.as_str()
+            ));
+        }
+        Ok(out)
+    }
+
     pub fn apply_run_event(&self, id: &str, event: &RunEvent) -> Result<Applied> {
         let tx = self.write_tx()?;
         let state: String = tx
@@ -1194,6 +1228,18 @@ mod tests {
             .spent(),
             None
         );
+    }
+
+    #[test]
+    fn a_state_written_around_the_reducer_is_caught() {
+        let s = store_with_run();
+        s.apply_run_event("r1", &RunEvent::Started).expect("start");
+        assert!(s.run_history_mismatches("r1").expect("check").is_empty());
+        s.conn
+            .execute("UPDATE runs SET state = 'finished' WHERE id = 'r1'", [])
+            .expect("sneak");
+        let bad = s.run_history_mismatches("r1").expect("check");
+        assert_eq!(bad, ["stored state is finished, events end at running"]);
     }
 
     fn store_with_run() -> Store {

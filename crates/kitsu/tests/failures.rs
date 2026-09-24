@@ -23,6 +23,22 @@ struct Env {
 
 impl Drop for Env {
     fn drop(&mut self) {
+        // Every scenario ends by checking that each run's stored state is
+        // the end of its recorded transitions (invariant
+        // run-row-is-the-fold-of-its-events).
+        if !std::thread::panicking()
+            && let Ok(ws) = Workspace::discover(&self.repo)
+            && let Ok(store) = ws.open_store()
+        {
+            for r in store.recent_runs(10_000).unwrap_or_default() {
+                let bad = store.run_history_mismatches(&r.id).expect("history");
+                assert!(
+                    bad.is_empty(),
+                    "run {} history disagrees with its row: {bad:?}",
+                    r.id
+                );
+            }
+        }
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
@@ -757,4 +773,36 @@ fn memory_goes_stale_with_its_code_and_reaches_the_brief() {
     let bad = env.out(&["remember", "x", "--kind", "rumor"]);
     assert!(!bad.status.success());
     assert!(String::from_utf8_lossy(&bad.stderr).contains("unknown memory kind"));
+}
+
+#[test]
+fn reverting_a_superseding_note_brings_the_old_one_back() {
+    let env = Env::new("supersede");
+    let dir = env.repo.join(".kitsu/memory");
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::write(
+        dir.join("budget-3.md"),
+        "+++\ntitle = \"Retry budget is 3\"\nkind = \"fact\"\nscope = [\"payments.py\"]\n+++\n",
+    )
+    .expect("w");
+    git(&env.repo, &["add", "-A"]);
+    git(&env.repo, &["commit", "-qm", "note"]);
+    std::fs::write(
+        dir.join("budget-5.md"),
+        "+++\ntitle = \"Retry budget is 5\"\nkind = \"fact\"\nscope = [\"payments.py\"]\nsupersedes = [\"budget-3\"]\n+++\n",
+    )
+    .expect("w");
+    git(&env.repo, &["add", "-A"]);
+    git(&env.repo, &["commit", "-qm", "supersede"]);
+    let brief = env.ok(&["brief", "bounded-retries"]);
+    assert!(
+        brief.contains("Retry budget is 5") && !brief.contains("Retry budget is 3"),
+        "{brief}"
+    );
+    git(&env.repo, &["revert", "--no-edit", "HEAD"]);
+    let brief = env.ok(&["brief", "bounded-retries"]);
+    assert!(
+        brief.contains("Retry budget is 3"),
+        "retraction is a revert:\n{brief}"
+    );
 }
