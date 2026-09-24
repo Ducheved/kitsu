@@ -136,7 +136,10 @@ pub fn prepare(ws: &Workspace, store: &Store, me: &Instance, opts: &Options) -> 
     })?;
 
     let started = (|| {
-        git.worktree_add(&worktree, &branch, &base)?;
+        {
+            let _guard = ws.lock_worktrees()?;
+            git.worktree_add(&worktree, &branch, &base)?;
+        }
         let run = store.run(&id)?;
         let b = brief::compile(
             &Context {

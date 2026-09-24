@@ -894,7 +894,21 @@ fn run(ws: &Workspace, opts: Options, quiet: bool, json: bool) -> Result<std::pr
         .enable_all()
         .build()
         .map_err(|e| Error::io("starting async runtime", e))?;
-    let state = rt.block_on(runner::drive(ws, &store, &prep, &opts, !quiet && !json))?;
+    let driven = rt.block_on(runner::drive(ws, &store, &prep, &opts, !quiet && !json));
+    // Whatever went wrong after the run row exists goes into the run, so
+    // it never sits in "starting" with the reason only on a closed stderr.
+    let state = match driven {
+        Ok(s) => s,
+        Err(e) => {
+            let event = match store.run(&prep.id).map(|r| r.state) {
+                Ok(RunState::Starting) => RunEvent::StartFailed(e.to_string()),
+                _ => RunEvent::ProtocolError(format!("kitsu failed while supervising: {e}")),
+            };
+            let _ = store.apply_run_event(&prep.id, &event);
+            let _ = runner::finish(ws, &store, &prep.id, false);
+            return Err(e);
+        }
+    };
     let snapshot = runner::finish(ws, &store, &prep.id, opts.verify)?;
     let run = store.run(&prep.id)?;
     if json {

@@ -203,7 +203,9 @@ pub fn accept(
     let result = build_and_apply(
         ws, store, &git, &intent, task, &run, &snapshot, &id, &dir, &target, &head, opts,
     );
-    let _ = ws.git().worktree_remove(&dir);
+    if let Ok(_guard) = ws.lock_worktrees() {
+        let _ = ws.git().worktree_remove(&dir);
+    }
     if let Err(e) = &result {
         let _ = store.set_integration(&id, IntegrationState::Failed, None, Some(&e.to_string()));
     }
@@ -225,7 +227,10 @@ fn build_and_apply(
     head: &str,
     opts: &AcceptOptions,
 ) -> Result<Accepted> {
-    git.worktree_add_detached(dir, head)?;
+    {
+        let _guard = ws.lock_worktrees()?;
+        git.worktree_add_detached(dir, head)?;
+    }
     let scratch = Git::new(dir);
     if let Err(paths) = scratch.merge_squash(snapshot)? {
         store.set_integration(
@@ -350,9 +355,15 @@ pub fn cleanup_run(ws: &Workspace, store: &Store, run: &RunRow) -> Vec<String> {
     let mut notes = Vec::new();
     let git = ws.git();
     let wt = PathBuf::from(&run.worktree);
-    if wt.exists()
-        && let Err(e) = git.worktree_remove(&wt)
-    {
+    let removed = if wt.exists() {
+        match ws.lock_worktrees() {
+            Ok(_guard) => git.worktree_remove(&wt),
+            Err(e) => Err(e),
+        }
+    } else {
+        Ok(())
+    };
+    if let Err(e) = removed {
         notes.push(format!("could not remove worktree {}: {e}", wt.display()));
         let _ = store.append(
             Some(&run.id),

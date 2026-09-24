@@ -42,14 +42,49 @@ impl Workspace {
             }
             e => e,
         })?;
-        // The first entry of `worktree list` is the main worktree.
-        let root = git
-            .worktree_paths()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::Invalid("git worktree list returned nothing".into()))?;
+        // Normal layout: the common dir is `<main worktree>/.git`. Avoid
+        // `git worktree list` here: it reads every worktree's metadata and
+        // fails while another process is halfway through `worktree add`.
+        let root = match (common.file_name(), common.parent()) {
+            (Some(name), Some(parent)) if name == ".git" => parent.to_path_buf(),
+            // Separate git dir (`git init --separate-git-dir`, submodules):
+            // ask git, under the worktree lock so nobody is mid-add.
+            _ => {
+                let state = common.join("kitsu");
+                let _guard = Workspace {
+                    root: path.to_path_buf(),
+                    state,
+                }
+                .lock_worktrees()?;
+                git.worktree_paths()?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Error::Invalid("git worktree list returned nothing".into()))?
+            }
+        };
         let state = common.join("kitsu");
         Ok(Workspace { root, state })
+    }
+
+    /// Serializes `git worktree add/remove/prune` across every Kitsu process
+    /// on this clone. Git's worktree commands are not safe to run
+    /// concurrently: under load, one process can read another's
+    /// half-written `.git/worktrees/<name>` and fail. Found by the 300-run
+    /// scale probe. Hold the guard only around the git call itself; taking
+    /// it twice in one process deadlocks.
+    pub fn lock_worktrees(&self) -> Result<File> {
+        std::fs::create_dir_all(&self.state)
+            .map_err(|e| Error::io(self.state.display().to_string(), e))?;
+        let path = self.state.join("worktrees.lock");
+        let f = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| Error::io(path.display().to_string(), e))?;
+        f.lock()
+            .map_err(|e| Error::io(format!("locking {}", path.display()), e))?;
+        Ok(f)
     }
 
     pub fn git(&self) -> Git {

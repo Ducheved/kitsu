@@ -121,6 +121,7 @@ pub fn recover(ws: &Workspace, store: &Store) -> Result<Report> {
             }
         };
         if dir.exists() {
+            let _guard = ws.lock_worktrees()?;
             let _ = git.worktree_remove(&dir);
         }
         report
@@ -158,7 +159,10 @@ pub fn recover(ws: &Workspace, store: &Store) -> Result<Report> {
             }
         }
     }
-    let _ = git.prune_worktrees();
+    {
+        let _guard = ws.lock_worktrees()?;
+        let _ = git.prune_worktrees();
+    }
 
     if let Ok(entries) = std::fs::read_dir(ws.state.join("worktrees")) {
         for e in entries.flatten() {

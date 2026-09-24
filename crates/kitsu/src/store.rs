@@ -312,10 +312,36 @@ pub enum Applied {
 }
 
 impl Store {
+    /// Open (and create or migrate) the state database.
+    ///
+    /// Opening is idempotent, so it is retried a few times on SQLITE_BUSY:
+    /// some of the locks taken while opening a WAL database don't go
+    /// through the busy handler, and with hundreds of workers starting at
+    /// once one of them occasionally loses. Five attempts over about two
+    /// seconds, then the error is reported as is.
     pub fn open(path: &Path) -> Result<Store> {
+        let mut delay = std::time::Duration::from_millis(40);
+        for attempt in 1.. {
+            match Store::open_once(path) {
+                Err(Error::Db(rusqlite::Error::SqliteFailure(e, _)))
+                    if e.code == rusqlite::ErrorCode::DatabaseBusy && attempt < 5 =>
+                {
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                }
+                other => return other,
+            }
+        }
+        unreachable!("the loop returns")
+    }
+
+    fn open_once(path: &Path) -> Result<Store> {
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        let mode: String = conn.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            conn.pragma_update(None, "journal_mode", "WAL")?;
+        }
         // NORMAL in WAL mode survives process crashes; a power loss can drop
         // the last transactions. Every effect Kitsu performs can be
         // reconciled against git or the filesystem, see docs/design.md.
@@ -332,6 +358,18 @@ impl Store {
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// Every write goes through `BEGIN IMMEDIATE`. A deferred transaction
+    /// that reads and then writes gets SQLITE_BUSY straight away, without
+    /// honoring busy_timeout, when another process committed in between;
+    /// with a few hundred workers that happens constantly. Found by the
+    /// 300-run scale probe.
+    fn write_tx(&self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
     }
 
     fn migrate(&self) -> Result<()> {
@@ -362,7 +400,7 @@ impl Store {
     // ---- runs --------------------------------------------------------------
 
     pub fn insert_run(&self, r: &NewRun<'_>) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute(
             "INSERT INTO runs (id, task, agent, base, branch, worktree, state, owner, from_run, note, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'starting', ?7, ?8, ?9, ?10)",
@@ -433,7 +471,7 @@ impl Store {
     /// The only way run state changes. Reads, reduces and writes in one
     /// transaction, so two processes racing on the same run cannot both win.
     pub fn apply_run_event(&self, id: &str, event: &RunEvent) -> Result<Applied> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let state: String = tx
             .query_row("SELECT state FROM runs WHERE id = ?1", [id], |r| r.get(0))
             .optional()?
@@ -506,7 +544,7 @@ impl Store {
     }
 
     pub fn set_run_snapshot(&self, id: &str, commit: &str) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute(
             "UPDATE runs SET snapshot = ?2 WHERE id = ?1",
             params![id, commit],
@@ -524,7 +562,7 @@ impl Store {
     /// Accept or discard, once. A second resolution is a conflict: somebody
     /// else already decided.
     pub fn resolve_run(&self, id: &str, resolution: &str) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let n = tx.execute(
             "UPDATE runs SET resolution = ?2 WHERE id = ?1 AND resolution IS NULL",
             params![id, resolution],
@@ -563,7 +601,7 @@ impl Store {
         if events.is_empty() {
             return Ok(());
         }
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         for (kind, body) in events {
             append_event(&tx, Some(run), kind, body)?;
         }
@@ -599,7 +637,7 @@ impl Store {
     // ---- evidence ----------------------------------------------------------
 
     pub fn insert_evidence(&self, e: &NewEvidence<'_>) -> Result<i64> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute(
             "INSERT INTO evidence (check_name, fingerprint, command, tree, tree_after, outcome, exit_code,
                                    duration_ms, log, log_bytes, run, started_at)
@@ -687,7 +725,7 @@ impl Store {
     // ---- asks: a live agent waiting on a human ------------------------------
 
     pub fn insert_ask(&self, run: &str, request: &Value) -> Result<i64> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute(
             "INSERT INTO asks (run, request, created_at) VALUES (?1, ?2, ?3)",
             params![run, request.to_string(), now_ms()],
@@ -705,7 +743,7 @@ impl Store {
 
     /// First answer wins. Returns false if it was already answered.
     pub fn answer_ask(&self, id: i64, answer: &str) -> Result<bool> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let n = tx.execute(
             "UPDATE asks SET answer = ?2, answered_at = ?3 WHERE id = ?1 AND answer IS NULL",
             params![id, answer, now_ms()],
@@ -757,7 +795,7 @@ impl Store {
         close_task: bool,
         owner: &str,
     ) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute(
             "INSERT INTO integrations (id, run, target, expected, state, close_task, owner, created_at)
              VALUES (?1, ?2, ?3, ?4, 'preparing', ?5, ?6, ?7)",
@@ -780,7 +818,7 @@ impl Store {
         candidate: Option<&str>,
         detail: Option<&str>,
     ) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let ended = state.is_terminal().then(now_ms);
         let n = tx.execute(
             "UPDATE integrations SET state = ?2, candidate = COALESCE(?3, candidate), detail = COALESCE(?4, detail),
