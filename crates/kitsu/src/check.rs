@@ -421,14 +421,18 @@ mod tests {
 
         repo.write("docs/a.md", "2");
         let t = git.worktree_tree(&ws.scratch()).expect("tree");
-        assert!(matches!(
-            status_at(&git, &store, &scoped, &t).expect("s"),
-            CheckStatus::Carried { .. }
-        ));
-        assert!(matches!(
-            status_at(&git, &store, &unscoped, &t).expect("s"),
-            CheckStatus::Stale { .. }
-        ));
+        // Print what we got: this failed once under heavy load and the bare
+        // matches! left nothing to go on (task freshness-flake).
+        let got = status_at(&git, &store, &scoped, &t).expect("s");
+        assert!(
+            matches!(got, CheckStatus::Carried { .. }),
+            "scoped after docs edit: {got:?} (tree {t})"
+        );
+        let got = status_at(&git, &store, &unscoped, &t).expect("s");
+        assert!(
+            matches!(got, CheckStatus::Stale { .. }),
+            "unscoped after docs edit: {got:?} (tree {t})"
+        );
 
         repo.write("src/lib.rs", "2");
         let t = git.worktree_tree(&ws.scratch()).expect("tree");
