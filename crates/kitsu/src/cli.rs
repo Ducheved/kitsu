@@ -169,6 +169,15 @@ enum Cmd {
     },
     /// Memory notes and whether they are still current.
     Memory,
+    /// Search the code at a commit (default HEAD). Builds or refreshes the
+    /// local index first; only files that changed are read.
+    Search {
+        query: Vec<String>,
+        #[arg(long, short = 'n', default_value_t = 10)]
+        limit: usize,
+        #[arg(long, default_value = "HEAD")]
+        rev: String,
+    },
 }
 
 pub fn main() -> std::process::ExitCode {
@@ -300,6 +309,7 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
             personal,
         } => remember(&ws, &title, &kind, scope, anchor, &body, personal),
         Cmd::Memory => memory_cmd(&ws, json),
+        Cmd::Search { query, limit, rev } => search_cmd(&ws, &query.join(" "), limit, &rev, json),
         Cmd::Recover => {
             let store = ws.open_store()?;
             let r = recover::recover(&ws, &store)?;
@@ -1277,6 +1287,42 @@ fn remember(
         write_new(ws, Kind::Memory, title, None, &text)?
     };
     println!("{}", path.display());
+    Ok(())
+}
+
+fn search_cmd(ws: &Workspace, query: &str, limit: usize, rev: &str, json: bool) -> Result<()> {
+    let git = ws.git();
+    let mut ix = crate::index::Index::open(&ws.state.join("index.db"))?;
+    let updated = ix.update(&git, rev)?;
+    let hits = ix.search(&git, query, limit)?;
+    if json {
+        println!("{}", json!({ "index": updated, "hits": hits }));
+        return Ok(());
+    }
+    if updated.new_blobs > 0 {
+        eprintln!(
+            "{}",
+            paint(
+                &format!(
+                    "indexed {} new files in {} ms",
+                    updated.new_blobs, updated.ms
+                ),
+                DIM
+            )
+        );
+    }
+    if hits.is_empty() {
+        println!("no matches");
+    }
+    for h in &hits {
+        println!(
+            "{}",
+            paint(&format!("{}:{}-{}", h.path, h.start, h.end), BOLD)
+        );
+        for (n, line) in &h.lines {
+            println!("  {n:>5}  {line}");
+        }
+    }
     Ok(())
 }
 

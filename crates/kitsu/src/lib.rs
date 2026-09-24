@@ -11,6 +11,7 @@ pub mod cli;
 pub mod digest;
 pub mod error;
 pub mod git;
+pub mod index;
 pub mod integrate;
 pub mod intent;
 pub mod memory;
