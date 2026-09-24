@@ -658,7 +658,7 @@ mod tests {
             .collect();
         let repo = TempRepo::new(&refs);
         let git = repo.git();
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let root = repo.root.clone();
         std::thread::spawn(move || {
             let _ = tx.send(super::Git::new(&root).files_at("HEAD", "f"));
