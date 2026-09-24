@@ -509,6 +509,25 @@ fn checks_run_on_the_combined_result_not_just_the_worktree() {
         "green in its worktree, red combined: {}",
         String::from_utf8_lossy(&o.stdout)
     );
+    // The next attempt's brief must not report the combined failure as the
+    // attempt's own result, or the attempt's pass as a pass after merging.
+    let brief = env.ok(&["brief", "bounded-retries"]);
+    let line = |prefix: &str| {
+        brief
+            .lines()
+            .find(|l| l.trim_start().starts_with(prefix))
+            .unwrap_or_else(|| panic!("no `{prefix}` line in:\n{brief}"))
+            .to_string()
+    };
+    let own = line("Checks on its own change:");
+    assert!(
+        own.contains("retries pass") && !own.contains("fail"),
+        "{own}"
+    );
+    assert!(
+        line("Checks on other trees").contains("retries fail"),
+        "{brief}"
+    );
 }
 
 #[test]

@@ -512,13 +512,28 @@ fn describe_attempt(git: &Git, store: &Store, r: &RunRow) -> String {
         };
         let _ = writeln!(s, "  Changed: {}{more}.", files.join(", "));
     }
+    // Evidence tagged with the run is not all about the run's own change:
+    // accept checks the change combined with the target branch, and a
+    // check that edits files proves nothing about the tree it started on.
     let evidence = store.evidence_for_run(&r.id).unwrap_or_default();
-    if !evidence.is_empty() {
-        let results: Vec<String> = evidence
-            .iter()
+    let (own, other): (Vec<_>, Vec<_>) = evidence.iter().partition(|e| {
+        r.snapshot_tree.as_deref() == Some(e.tree.as_str()) && e.tree_after.is_none()
+    });
+    let list = |v: &[&crate::store::EvidenceRow]| {
+        v.iter()
             .map(|e| format!("{} {}", e.check_name, e.outcome.as_str()))
-            .collect();
-        let _ = writeln!(s, "  Checks: {}.", results.join(", "));
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if !own.is_empty() {
+        let _ = writeln!(s, "  Checks on its own change: {}.", list(&own));
+    }
+    if !other.is_empty() {
+        let _ = writeln!(
+            s,
+            "  Checks on other trees (combined with the target branch at accept, or a check that edited files): {}.",
+            list(&other)
+        );
     }
     if let Some(n) = r.note.as_deref().filter(|n| !n.trim().is_empty()) {
         let _ = writeln!(s, "  Note given to it: {}", n.trim());
