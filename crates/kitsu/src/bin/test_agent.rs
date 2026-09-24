@@ -71,6 +71,17 @@ struct Step {
     #[serde(default)]
     garbage: bool,
     stop: Option<String>,
+    /// Call a tool on the first MCP server offered in `session/new` and say
+    /// its text result: `mcp = { tool = "orient" }`.
+    mcp: Option<McpCall>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpCall {
+    tool: String,
+    #[serde(default)]
+    args: toml::Table,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +113,7 @@ struct Agent {
     session: String,
     cancelled: bool,
     script: Script,
+    mcp_servers: Vec<Value>,
 }
 
 fn send(v: &Value) {
@@ -311,6 +323,13 @@ impl Agent {
                     std::thread::sleep(Duration::from_secs(3600));
                 }
             }
+            if let Some(call) = &step.mcp {
+                let text = match self.mcp_servers.first() {
+                    Some(server) => call_mcp(server, &call.tool, &call.args),
+                    None => "no MCP server was offered".into(),
+                };
+                self.say(&format!("[mcp {}]\n{text}", call.tool));
+            }
             if let Some(reason) = &step.stop {
                 return reason.clone();
             }
@@ -321,6 +340,60 @@ impl Agent {
             "end_turn".into()
         }
     }
+}
+
+/// Start an MCP server the way an agent would (command + args from
+/// `session/new`), initialize, call one tool, return its text.
+fn call_mcp(server: &Value, tool: &str, args: &toml::Table) -> String {
+    use std::io::{BufReader, Write as _};
+    let command = server["command"].as_str().unwrap_or("");
+    let argv: Vec<String> = server["args"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut child = match std::process::Command::new(command)
+        .args(&argv)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return format!("could not start MCP server: {e}"),
+    };
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut out = BufReader::new(child.stdout.take().expect("stdout"));
+    let args = serde_json::to_value(args).unwrap_or(json!({}));
+    for m in [
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "kitsu-test-agent", "version": "0" } } }),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": tool, "arguments": args } }),
+    ] {
+        let _ = writeln!(stdin, "{m}");
+    }
+    drop(stdin);
+    let mut text = String::new();
+    let mut line = String::new();
+    while out.read_line(&mut line).unwrap_or(0) > 0 {
+        if let Ok(v) = serde_json::from_str::<Value>(&line)
+            && v["id"] == 2
+        {
+            text = v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            if v["result"]["isError"] == true {
+                text = format!("tool error: {text}");
+            }
+        }
+        line.clear();
+    }
+    let _ = child.wait();
+    text
 }
 
 fn main() {
@@ -362,6 +435,7 @@ fn main() {
         session: String::new(),
         cancelled: false,
         script,
+        mcp_servers: Vec::new(),
     };
     loop {
         let Some(msg) = agent.poll(Duration::from_secs(3600)) else {
@@ -379,6 +453,10 @@ fn main() {
                 if let Some(cwd) = msg["params"]["cwd"].as_str() {
                     agent.cwd = PathBuf::from(cwd);
                 }
+                agent.mcp_servers = msg["params"]["mcpServers"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
                 agent.session = format!("s-{}", std::process::id());
                 send(
                     &json!({ "jsonrpc": "2.0", "id": id, "result": { "sessionId": agent.session } }),

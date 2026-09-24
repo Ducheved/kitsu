@@ -468,6 +468,10 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
     }
     let _ = writeln!(
         out,
+        "- If you have Kitsu's MCP tools (server `kitsu`), `orient` tells you where your checks stand on your current files, `search` finds code without reading files, `rules_for` lists what covers a path. They answer from recorded state and cost less than exploring."
+    );
+    let _ = writeln!(
+        out,
         "- If you need a decision from a human, write `.kitsu/questions/<short-name>.md` (front matter: `title`, `blocks = [\"{}\"]`) and stop.",
         task.id
     );

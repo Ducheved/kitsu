@@ -32,6 +32,9 @@ pub struct AgentSpec {
     /// agents must not assume anything about `_meta` keys they don't know,
     /// so this is only set for agents known to read it.
     pub meta: Option<Value>,
+    /// Offer Kitsu's MCP server (`kitsu mcp`) in `session/new`. On unless
+    /// an agents.toml entry says `mcp = false`.
+    pub mcp: bool,
     pub source: &'static str,
 }
 
@@ -78,6 +81,7 @@ struct Entry {
     #[serde(default)]
     env: BTreeMap<String, String>,
     meta: Option<toml::Table>,
+    mcp: Option<bool>,
 }
 
 pub fn all() -> Result<Vec<AgentSpec>> {
@@ -90,6 +94,7 @@ pub fn all() -> Result<Vec<AgentSpec>> {
                 command: cmd.iter().map(|s| s.to_string()).collect(),
                 env: BTreeMap::new(),
                 meta: preset_meta(name),
+                mcp: true,
                 source: "preset",
             },
         );
@@ -102,6 +107,7 @@ pub fn all() -> Result<Vec<AgentSpec>> {
                 command: vec![test],
                 env: BTreeMap::new(),
                 meta: None,
+                mcp: true,
                 source: "bundled",
             },
         );
@@ -144,6 +150,7 @@ fn apply_config(
                 command: e.command,
                 env: e.env,
                 meta,
+                mcp: e.mcp.unwrap_or(true),
                 source: "agents.toml",
             },
         );
@@ -191,6 +198,7 @@ mod tests {
                         command: c.iter().map(|s| s.to_string()).collect(),
                         env: BTreeMap::new(),
                         meta: preset_meta(n),
+                        mcp: true,
                         source: "preset",
                     },
                 )

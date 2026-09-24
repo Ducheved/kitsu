@@ -279,10 +279,17 @@ pub async fn drive(
     let mut rec = Recorder::new(id, &prep.worktree, echo);
 
     // ---- handshake ----
+    let mcp = opts
+        .agent
+        .mcp
+        .then(|| std::env::current_exe().ok())
+        .flatten()
+        .map(|exe| crate::mcp::acp_server_entry(&exe, &prep.worktree, id));
     let session = match handshake(
         &client,
         &prep.worktree,
         opts.agent.meta.as_ref(),
+        mcp,
         &mut incoming,
     )
     .await
@@ -434,10 +441,11 @@ pub async fn drive(
     Ok(store.run(id)?.state)
 }
 
-/// `session/new` parameters. No MCP servers yet; `_meta` only for agents
-/// configured with it.
-fn session_new_params(cwd: &str, meta: Option<&Value>) -> Value {
-    let mut p = json!({ "cwd": cwd, "mcpServers": [] });
+/// `session/new` parameters: Kitsu's MCP server for this run (unless the
+/// agent is configured without it), and `_meta` only for agents configured
+/// with it.
+fn session_new_params(cwd: &str, meta: Option<&Value>, mcp: Option<Value>) -> Value {
+    let mut p = json!({ "cwd": cwd, "mcpServers": mcp.into_iter().collect::<Vec<_>>() });
     if let Some(m) = meta {
         p["_meta"] = m.clone();
     }
@@ -448,6 +456,7 @@ async fn handshake(
     client: &Client,
     worktree: &Path,
     meta: Option<&Value>,
+    mcp: Option<Value>,
     incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
 ) -> Result<String> {
     let init = with_violations(
@@ -470,7 +479,7 @@ async fn handshake(
         incoming,
         tokio::time::timeout(
             INIT_TIMEOUT,
-            client.request("session/new", session_new_params(&cwd, meta)),
+            client.request("session/new", session_new_params(&cwd, meta, mcp)),
         ),
     )
     .await?;
@@ -919,10 +928,16 @@ mod tests {
 
     #[test]
     fn session_new_sends_meta_only_when_configured() {
-        let plain = session_new_params("/w", None);
+        let plain = session_new_params("/w", None, None);
+        assert_eq!(plain["mcpServers"], json!([]));
         assert!(plain.get("_meta").is_none());
         let meta = json!({ "systemPrompt": { "excludeDynamicSections": true } });
-        let with = session_new_params("/w", Some(&meta));
+        let entry = crate::mcp::acp_server_entry(Path::new("/bin/kitsu"), Path::new("/w"), "r1");
+        let with = session_new_params("/w", Some(&meta), Some(entry));
+        assert_eq!(
+            with["mcpServers"][0]["args"],
+            json!(["-C", "/w", "mcp", "--run", "r1"])
+        );
         assert_eq!(with["_meta"], meta);
         assert_eq!(with["cwd"], "/w");
     }

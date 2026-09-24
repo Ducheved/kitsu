@@ -806,3 +806,66 @@ fn reverting_a_superseding_note_brings_the_old_one_back() {
         "retraction is a revert:\n{brief}"
     );
 }
+
+#[test]
+fn agents_get_kitsu_tools_over_mcp_and_they_tell_the_truth() {
+    let env = Env::new("mcp");
+    let script = env.script(
+        "mcp",
+        r#"
+[[steps]]
+write = { path = "payments.py", content = "def charge():\n    pass\n" }
+[[steps]]
+mcp = { tool = "orient" }
+[[steps]]
+mcp = { tool = "search", args = { query = "where is charge defined" } }
+[[steps]]
+mcp = { tool = "rules_for", args = { path = "payments.py" } }
+[[steps]]
+mcp = { tool = "memory" }
+[[steps]]
+mcp = { tool = "nope" }
+"#,
+    );
+    assert!(
+        env.run_with(&script, "rmcp", &["--no-verify"])
+            .status
+            .success()
+    );
+    let said: String = env
+        .store()
+        .run_events("rmcp", 0, 10_000)
+        .expect("events")
+        .into_iter()
+        .filter(|e| e.kind == "agent.message")
+        .map(|e| e.body["text"].as_str().unwrap_or("").to_string())
+        .collect();
+    // orient: the task, what the agent changed, and required checks judged
+    // on its current files, with the rules from the main checkout.
+    assert!(said.contains("Task `bounded-retries`"), "{said}");
+    assert!(said.contains("- payments.py"), "{said}");
+    assert!(
+        said.contains("`retries`") && said.contains("unverified on your current files"),
+        "{said}"
+    );
+    assert!(
+        said.contains("`idempotency`"),
+        "the invariant's check is required:\n{said}"
+    );
+    // search finds the code at the base commit.
+    assert!(said.contains("payments.py:"), "{said}");
+    // rules_for names the invariant covering the file.
+    assert!(
+        said.contains("must hold: One idempotency key per logical charge"),
+        "{said}"
+    );
+    assert!(
+        said.contains("[mcp memory]") && said.contains("None."),
+        "{said}"
+    );
+    // An unknown tool is a readable error, not a crash.
+    assert!(
+        said.contains("tool error: error: unknown tool `nope`"),
+        "{said}"
+    );
+}

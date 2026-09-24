@@ -169,6 +169,12 @@ enum Cmd {
     },
     /// Memory notes and whether they are still current.
     Memory,
+    /// Serve Kitsu's read-only tools over MCP (stdio) for the agent of a
+    /// run. The runner offers this to every agent it starts.
+    Mcp {
+        #[arg(long)]
+        run: String,
+    },
     /// Search the code at a commit (default HEAD). Builds or refreshes the
     /// local index first; only files that changed are read.
     Search {
@@ -309,6 +315,11 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
             personal,
         } => remember(&ws, &title, &kind, scope, anchor, &body, personal),
         Cmd::Memory => memory_cmd(&ws, json),
+        Cmd::Mcp { run } => {
+            ws.open_store()?.run(&run)?;
+            let stdin = std::io::stdin();
+            crate::mcp::Server::new(ws, run).serve(stdin.lock(), std::io::stdout().lock())
+        }
         Cmd::Search { query, limit, rev } => search_cmd(&ws, &query.join(" "), limit, &rev, json),
         Cmd::Recover => {
             let store = ws.open_store()?;
