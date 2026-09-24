@@ -625,7 +625,10 @@ fn decide(policy: Policy, params: &Value, worktree: &Path) -> Decision {
                 .and_then(|o| o["optionId"].as_str())
                 .map(str::to_owned)
         };
-        pick("allow_once").or_else(|| pick("allow_always"))
+        // Only a one-time grant. Kitsu's policy judges one call; answering
+        // "always" would hand the agent a standing permission (in OpenCode,
+        // for every edit in every session). If once isn't offered, ask.
+        pick("allow_once")
     });
     let Some(allow) = allow else {
         return Decision::Human;
@@ -891,6 +894,28 @@ impl Recorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn never_auto_grants_a_standing_permission() {
+        let wt = Path::new("/w");
+        let only_always = json!({
+            "toolCall": { "kind": "edit", "title": "x", "locations": [{ "path": "/w/a.rs" }] },
+            "options": [{ "optionId": "always", "kind": "allow_always", "name": "Always" }, { "optionId": "no", "kind": "reject_once", "name": "No" }]
+        });
+        assert!(matches!(
+            decide(Policy::Ask, &only_always, wt),
+            Decision::Human
+        ));
+        assert!(matches!(
+            decide(Policy::Auto, &only_always, wt),
+            Decision::Human
+        ));
+        let both = json!({
+            "toolCall": { "kind": "edit", "title": "x", "locations": [{ "path": "/w/a.rs" }] },
+            "options": [{ "optionId": "always", "kind": "allow_always" }, { "optionId": "once", "kind": "allow_once" }]
+        });
+        assert!(matches!(decide(Policy::Ask, &both, wt), Decision::Answer(o, _) if o == "once"));
+    }
 
     #[test]
     fn session_new_sends_meta_only_when_configured() {
