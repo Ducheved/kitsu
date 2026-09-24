@@ -13,3 +13,7 @@ Checks on the combined result are the backstop.
 
 Revisit when a retrieval experiment on real tasks shows a gain worth the
 index's invalidation and memory cost.
+
+Update: a lexical index exists now (decision `lexical-index`), justified
+by an eval against grep. Embeddings and LSP are still out, on the gates
+there.
