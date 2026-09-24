@@ -31,3 +31,8 @@ reads. That needs a real agent (live-agent-smoke).
 
 Revisit if: Codex or Gemini expose a similar switch, or measurements show
 the hit rate doesn't move.
+
+Update: the rules now ride at the end of the system prompt (decision
+`rules-channel`), so the large system block is per task and misses once
+per run; the tool list and the first system block still match across
+runs.

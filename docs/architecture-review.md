@@ -158,10 +158,12 @@ task with hypotheses, not labelled flaky.
 
 ## 4. Unknowns
 
-- Whether each agent keeps Kitsu's brief verbatim through its own
-  compaction. Codex keeps user messages up to 20k tokens (its token-budget
-  mode keeps none); OpenCode and Pi summarise all but a 2k–20k tail. Needs
-  the probe in §8 (E1).
+- Whether OpenCode and Codex keep Kitsu's brief through their own
+  compaction. Claude Code doesn't: measured with the probe (E1), the
+  invariant text was in 0/10 post-compaction requests; with the rules in
+  the system prompt, 10/10 (decision `rules-channel`, now shipped). Codex
+  keeps user messages up to 20k tokens by design; OpenCode and Pi
+  summarise all but a 2k–20k tail.
 - Whether `excludeDynamicSections` actually makes Claude Code's system
   prompt hit the provider cache across runs (decision `prompt-cache`).
 - Whether agents use `kitsu mcp` tools when offered, and whether that
@@ -178,7 +180,7 @@ task with hypotheses, not labelled flaky.
 
 | # | Failure | Kitsu today | Status |
 |---|---|---|---|
-| F01 | Architecture intent lost after compaction | invariants re-sent only in the brief; `orient`/`rules_for` re-fetch on demand | hypothesis: depends on the agent (E1) |
+| F01 | Architecture intent lost after compaction | **verified for Claude Code** (0/10 without the fix); now the anchor rides in the system prompt (10/10); `orient`/`rules_for` re-fetch on demand | fixed for Claude Code; OpenCode/Codex unmeasured |
 | F02 | Rejected hypothesis survives as fact | agent prose never enters state or the next brief | holds by construction |
 | F03 | New evidence invalidates descendants | evidence staleness by scope; no link from a revoked decision to tasks built on it | **gap**, no observed failure yet |
 | F04 | False DONE | agents can't mark done; checks are run by Kitsu | holds (tested) |

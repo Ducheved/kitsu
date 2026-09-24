@@ -57,6 +57,12 @@ pub struct Brief {
     pub omitted: Vec<Omitted>,
     /// Intent files that failed to parse. Always shown, never trimmed.
     pub problems: Vec<String>,
+    /// The part that must survive the agent compacting its own context: the
+    /// task, what done means, what must hold. Sent through a channel the
+    /// agent re-sends on every request (Claude Code's system prompt) where
+    /// one exists; the compaction probe showed the first user message alone
+    /// doesn't survive (decision `rules-channel`).
+    pub anchor: String,
 }
 
 pub struct Context<'a> {
@@ -106,6 +112,7 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
     }
 
     // ---- required: done means ----
+    let anchor_from = out.len();
     let _ = writeln!(out, "\n## Done means");
     let base_tree = match (cx.git, cx.base) {
         (Some(g), Some(b)) => g.tree_of(b).ok(),
@@ -202,6 +209,13 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
             });
         }
     }
+
+    let anchor = format!(
+        "# Kitsu rules for this run\n\nThis stays here when your context is compacted. The full brief is in the file named by $KITSU_BRIEF (or the `brief` tool of the `kitsu` MCP server); `orient` says where your checks stand now.\n\nTask `{}`: {}\n{}",
+        task.id,
+        task.title,
+        &out[anchor_from..]
+    );
 
     // ---- optional sections, in priority order ----
     let mut optional: Vec<Section> = Vec::new();
@@ -509,6 +523,7 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
         included,
         omitted,
         problems,
+        anchor,
     }
 }
 

@@ -116,6 +116,7 @@ pub struct Prepared {
     pub worktree: PathBuf,
     pub brief_path: PathBuf,
     pub brief: String,
+    pub anchor: String,
 }
 
 pub fn prepare(ws: &Workspace, store: &Store, me: &Instance, opts: &Options) -> Result<Prepared> {
@@ -190,20 +191,21 @@ pub fn prepare(ws: &Workspace, store: &Store, me: &Instance, opts: &Options) -> 
         );
         let blob = ws.blobs().put(b.markdown.as_bytes())?;
         store.set_run_brief(&id, &blob)?;
-        store.append(Some(&id), "run.brief", &json!({ "blob": blob, "included": b.included, "omitted": b.omitted, "problems": b.problems }))?;
+        store.append(Some(&id), "run.brief", &json!({ "blob": blob, "included": b.included, "omitted": b.omitted, "problems": b.problems, "anchor": b.anchor }))?;
         let dir = run_dir(ws, &id);
         std::fs::create_dir_all(&dir).map_err(|e| Error::io(dir.display().to_string(), e))?;
         let brief_path = dir.join("brief.md");
         std::fs::write(&brief_path, &b.markdown)
             .map_err(|e| Error::io(brief_path.display().to_string(), e))?;
-        Ok::<_, Error>((brief_path, b.markdown))
+        Ok::<_, Error>((brief_path, b.markdown, b.anchor))
     })();
     match started {
-        Ok((brief_path, brief)) => Ok(Prepared {
+        Ok((brief_path, brief, anchor)) => Ok(Prepared {
             id,
             worktree,
             brief_path,
             brief,
+            anchor,
         }),
         Err(e) => {
             let _ = store.apply_run_event(&id, &RunEvent::StartFailed(e.to_string()));
@@ -285,14 +287,8 @@ pub async fn drive(
         .then(|| std::env::current_exe().ok())
         .flatten()
         .map(|exe| crate::mcp::acp_server_entry(&exe, &prep.worktree, id));
-    let session = match handshake(
-        &client,
-        &prep.worktree,
-        opts.agent.meta.as_ref(),
-        mcp,
-        &mut incoming,
-    )
-    .await
+    let meta = with_rules_channel(opts.agent.meta.as_ref(), &prep.anchor);
+    let session = match handshake(&client, &prep.worktree, meta.as_ref(), mcp, &mut incoming).await
     {
         Ok(s) => s,
         Err(e) => {
@@ -439,6 +435,24 @@ pub async fn drive(
     store.apply_run_event(id, &RunEvent::Exited(exit))?;
     store.set_run_pid(id, None)?;
     Ok(store.run(id)?.state)
+}
+
+/// Agents whose `_meta` configures a system prompt (the Claude Agent SDK's
+/// `systemPrompt` preset) also get the brief's anchor appended to it. The
+/// system prompt is re-sent on every request, so the rules survive the
+/// agent's compaction; the first user message doesn't (compaction probe:
+/// invariant text in 0 of 10 post-compaction requests without this, 10 of
+/// 10 with it). Any `append` already configured is kept, first.
+fn with_rules_channel(meta: Option<&Value>, anchor: &str) -> Option<Value> {
+    let mut m = meta?.clone();
+    if let Some(sp) = m.get_mut("systemPrompt").and_then(Value::as_object_mut) {
+        let joined = match sp.get("append").and_then(Value::as_str) {
+            Some(prev) if !prev.is_empty() => format!("{prev}\n\n{anchor}"),
+            _ => anchor.to_string(),
+        };
+        sp.insert("append".into(), Value::String(joined));
+    }
+    Some(m)
 }
 
 /// `session/new` parameters: Kitsu's MCP server for this run (unless the
@@ -924,6 +938,22 @@ mod tests {
             "options": [{ "optionId": "always", "kind": "allow_always" }, { "optionId": "once", "kind": "allow_once" }]
         });
         assert!(matches!(decide(Policy::Ask, &both, wt), Decision::Answer(o, _) if o == "once"));
+    }
+
+    #[test]
+    fn the_rules_ride_in_the_system_prompt_only_for_agents_that_have_one() {
+        assert_eq!(with_rules_channel(None, "R"), None);
+        let other = json!({ "mode": "fast" });
+        assert_eq!(with_rules_channel(Some(&other), "R"), Some(other.clone()));
+        let claude = json!({ "systemPrompt": { "excludeDynamicSections": true } });
+        let got = with_rules_channel(Some(&claude), "R").expect("meta");
+        assert_eq!(got["systemPrompt"]["append"], "R");
+        assert_eq!(got["systemPrompt"]["excludeDynamicSections"], true);
+        let mine = json!({ "systemPrompt": { "append": "mine" } });
+        assert_eq!(
+            with_rules_channel(Some(&mine), "R").expect("meta")["systemPrompt"]["append"],
+            "mine\n\nR"
+        );
     }
 
     #[test]
