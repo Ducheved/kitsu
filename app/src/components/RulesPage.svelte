@@ -99,7 +99,11 @@
         <div class="item-head">
           <span class="item-title">{m.title}</span>
           <span class="pill dim">{t(`memkind.${m.kind}`)}</span>
-          {#if m.freshness?.status === "stale"}
+          {#if m.state === "retired"}
+            <span class="pill dim" title={m.reason ?? ""}>{t("rules.memoryRetired")}</span>
+          {:else if m.superseded_by}
+            <span class="pill dim">{t("rules.memorySuperseded", { by: m.superseded_by })}</span>
+          {:else if m.freshness?.status === "stale"}
             <span class="pill warn" title={t("rules.memoryStaleHint", { files: m.freshness.changed.join(", ") })}>{t("rules.memoryStale")}</span>
           {:else if m.freshness?.status === "uncommitted"}
             <span class="pill dim">{t("rules.memoryUncommitted")}</span>

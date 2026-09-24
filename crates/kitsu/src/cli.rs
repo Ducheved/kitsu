@@ -1124,7 +1124,9 @@ fn review(ws: &Workspace, run: &str, diff: bool, json: bool) -> Result<()> {
             ),
             _ => "binary".into(),
         };
-        let flag = if r.protected.contains(&f.path) {
+        let flag = if r.protected.contains(&f.path) && intent::is_memory_note(&f.path) {
+            paint("  proposed note", YELLOW)
+        } else if r.protected.contains(&f.path) {
             paint("  protected", YELLOW)
         } else {
             String::new()
@@ -1138,8 +1140,13 @@ fn review(ws: &Workspace, run: &str, diff: bool, json: bool) -> Result<()> {
         println!("  check {name:<14} {}", status_word(s));
     }
     if let Some(t) = &r.approval_token {
+        let what = if r.protected.iter().all(|p| intent::is_memory_note(p)) {
+            "proposes memory notes"
+        } else {
+            "changes rules or protected files"
+        };
         println!(
-            "{} changes rules or protected files; review them, then: kitsu accept {run} --approve {t}",
+            "{} {what}; review them, then: kitsu accept {run} --approve {t}",
             paint("note:", YELLOW)
         );
     }
@@ -1351,14 +1358,21 @@ fn memory_cmd(ws: &Workspace, json: bool) -> Result<()> {
     if intent.memory.is_empty() && personal.notes.is_empty() {
         println!("nothing remembered yet; `kitsu remember \"...\" --kind gotcha --scope <paths>`");
     }
+    let superseded = intent.superseded();
     for m in intent.memory.values().chain(personal.notes.iter()) {
-        let state = match fresh.get(&m.id) {
-            Some(Freshness::Stale { changed, .. }) => {
-                paint(&format!("stale: {} changed", changed.join(", ")), YELLOW)
+        let state = if m.state == intent::MemoryState::Retired {
+            paint("retired", DIM)
+        } else if let Some(by) = superseded.get(&m.id) {
+            paint(&format!("superseded by {by}"), DIM)
+        } else {
+            match fresh.get(&m.id) {
+                Some(Freshness::Stale { changed, .. }) => {
+                    paint(&format!("stale: {} changed", changed.join(", ")), YELLOW)
+                }
+                Some(Freshness::Uncommitted) => paint("not committed", DIM),
+                Some(Freshness::Current) => paint("current", GREEN),
+                _ => String::new(),
             }
-            Some(Freshness::Uncommitted) => paint("not committed", DIM),
-            Some(Freshness::Current) => paint("current", GREEN),
-            _ => String::new(),
         };
         println!("{:<11} {:<28} {}  {state}", m.kind.as_str(), m.id, m.title);
     }

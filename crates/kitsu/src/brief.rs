@@ -18,7 +18,7 @@ use serde::Serialize;
 use crate::check::status_at;
 use crate::git::Git;
 use crate::intent::{
-    DecisionState, Intent, InvariantState, Memory, MemoryKind, QuestionState, Task,
+    DecisionState, Intent, InvariantState, Memory, MemoryKind, MemoryState, QuestionState, Task,
 };
 use crate::memory::{self, Freshness, Personal};
 use crate::run::RunState;
@@ -298,9 +298,33 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
         (Some(g), Some(b)) => memory::freshness(g, b, intent.memory.values()).ok(),
         _ => None,
     };
+    // Retired and superseded notes stay out, and say so: "we used to
+    // believe X" is worth a line, not a place among current notes.
+    let superseded = intent.superseded();
     let mut notes: Vec<(&Memory, Option<&Freshness>, String)> = intent
         .memory
         .values()
+        .filter(|m| {
+            let gone = if m.state == MemoryState::Retired {
+                Some("retired".to_string())
+            } else {
+                superseded
+                    .get(&m.id)
+                    .map(|by| format!("superseded by `{by}`"))
+            };
+            if let Some(reason) = gone {
+                if m.scope.is_everything() || m.scope.may_overlap(&task.scope) {
+                    omitted.push(Omitted {
+                        kind: "memory",
+                        id: m.id.clone(),
+                        reason,
+                        reacquire: format!("read {}", m.source.path),
+                    });
+                }
+                return false;
+            }
+            true
+        })
         .filter_map(|m| {
             let why = if m.scope.is_everything() {
                 "applies to the whole repository".to_string()

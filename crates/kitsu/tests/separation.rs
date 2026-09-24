@@ -164,3 +164,88 @@ fn task_files_say_what_should_happen_never_what_happened() {
         assert_eq!(i.problems.len(), 1, "`{field}` should be reported");
     }
 }
+
+#[test]
+fn superseded_and_retired_notes_leave_the_brief_but_are_named() {
+    let note = |title: &str, extra: &str| {
+        format!("+++\ntitle = \"{title}\"\nkind = \"fact\"\nscope = [\"src/**\"]\n{extra}+++\n")
+    };
+    let old = note("Retry budget is 3", "key = \"retry.budget\"\n");
+    let new = note(
+        "Retry budget is 5",
+        "key = \"retry.budget\"\nsupersedes = [\"budget-3\"]\n",
+    );
+    let gone = note(
+        "Upstream has no rate limit",
+        "state = \"retired\"\nreason = \"it does since June\"\n",
+    );
+    let i = intent(&[
+        (".kitsu/memory/budget-3.md", &old),
+        (".kitsu/memory/budget-5.md", &new),
+        (".kitsu/memory/no-limit.md", &gone),
+    ]);
+    assert!(i.problems.is_empty(), "{:?}", i.problems);
+    assert_eq!(
+        i.superseded().get("budget-3").map(String::as_str),
+        Some("budget-5")
+    );
+    let md = brief_of(&i, "retry");
+    assert!(md.contains("Retry budget is 5"));
+    assert!(
+        !md.contains("Retry budget is 3"),
+        "superseded note leaked:\n{md}"
+    );
+    assert!(
+        !md.contains("Upstream has no rate limit"),
+        "retired note leaked:\n{md}"
+    );
+    assert!(
+        md.contains("memory `budget-3` (superseded by `budget-5`)"),
+        "{md}"
+    );
+    assert!(md.contains("memory `no-limit` (retired)"), "{md}");
+
+    // Two live notes claiming one key: reported, and neither is dropped.
+    let rival = note("Retry budget is 4", "key = \"retry.budget\"\n");
+    let i = intent(&[
+        (".kitsu/memory/budget-3.md", &old),
+        (".kitsu/memory/budget-4.md", &rival),
+    ]);
+    assert!(
+        i.problems
+            .iter()
+            .any(|p| p.detail.contains("all claim key `retry.budget`")),
+        "{:?}",
+        i.problems
+    );
+    let md = brief_of(&i, "retry");
+    assert!(md.contains("Retry budget is 3") && md.contains("Retry budget is 4"));
+    assert!(
+        md.contains("could not be read") || md.contains("all claim key"),
+        "the conflict is visible:\n{md}"
+    );
+
+    // Bad links are problems, not silent no-ops.
+    let i = intent(&[
+        (
+            ".kitsu/memory/a.md",
+            &note("A", "supersedes = [\"nope\", \"a\"]\n"),
+        ),
+        (".kitsu/memory/b.md", &note("B", "state = \"forgotten\"\n")),
+    ]);
+    let details: Vec<&str> = i.problems.iter().map(|p| p.detail.as_str()).collect();
+    assert!(
+        details.iter().any(|d| d.contains("unknown note `nope`")),
+        "{details:?}"
+    );
+    assert!(
+        details.iter().any(|d| d.contains("can't supersede itself")),
+        "{details:?}"
+    );
+    assert!(
+        details
+            .iter()
+            .any(|d| d.contains("unknown memory state `forgotten`")),
+        "{details:?}"
+    );
+}

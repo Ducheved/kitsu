@@ -231,6 +231,10 @@ export interface MemoryNote {
   path: string;
   freshness: Freshness | null;
   personal: boolean;
+  state: "current" | "retired";
+  superseded_by: string | null;
+  reason: string | null;
+  key: string | null;
 }
 
 export interface FileText {

@@ -574,6 +574,7 @@ pub async fn rules(state: State<'_, AppState>) -> R<Value> {
             None => Default::default(),
         };
         let personal = kitsu::memory::personal(&kitsu::workspace::config_dir());
+        let superseded = intent.superseded();
         let memory: Vec<Value> = intent
             .memory
             .values()
@@ -582,7 +583,8 @@ pub async fn rules(state: State<'_, AppState>) -> R<Value> {
             .map(|(m, f)| {
                 json!({ "id": m.id, "title": m.title, "kind": m.kind, "scope": m.scope.globs(), "anchors": m.anchors.globs(),
                         "by": m.by, "run": m.run, "body": m.body, "path": m.source.path, "freshness": f,
-                        "personal": m.id.starts_with("personal/") })
+                        "personal": m.id.starts_with("personal/"), "state": m.state,
+                        "superseded_by": superseded.get(&m.id), "reason": m.reason, "key": m.key })
             })
             .collect();
         Ok(json!({ "invariants": invariants, "decisions": decisions, "questions": questions, "memory": memory, "checks": checks }))

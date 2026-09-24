@@ -199,8 +199,26 @@ pub struct Memory {
     pub by: Option<String>,
     /// The run it came out of, if any.
     pub run: Option<String>,
+    /// `retired`: someone found it no longer holds. Kept, not deleted, so
+    /// the next agent can see what used to be believed and why it stopped.
+    pub state: MemoryState,
+    /// Notes this one replaces. "Superseded" is derived from this on read
+    /// (`Intent::superseded`); the old note is never edited.
+    pub supersedes: Vec<String>,
+    /// Declares a single-valued fact ("payments.retry_budget"): two live
+    /// notes with the same key are a problem, never settled by recency.
+    pub key: Option<String>,
+    /// Why it was retired or what changed, one line.
+    pub reason: Option<String>,
     pub body: String,
     pub source: Source,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryState {
+    Current,
+    Retired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -512,6 +530,48 @@ impl Intent {
                 }
             }
         }
+        let superseded = self.superseded();
+        for m in self.memory.values() {
+            for s in &m.supersedes {
+                if s == &m.id {
+                    found.push((
+                        m.source.path.clone(),
+                        "a note can't supersede itself".into(),
+                    ));
+                } else if !self.memory.contains_key(s) {
+                    found.push((
+                        m.source.path.clone(),
+                        format!("`supersedes` names unknown note `{s}`"),
+                    ));
+                } else if self.memory[s].supersedes.contains(&m.id) && m.id < *s {
+                    found.push((
+                        m.source.path.clone(),
+                        format!("notes `{}` and `{s}` supersede each other", m.id),
+                    ));
+                }
+            }
+        }
+        let mut by_key: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for m in self.memory.values() {
+            if let Some(k) = &m.key
+                && m.state == MemoryState::Current
+                && !superseded.contains_key(&m.id)
+            {
+                by_key.entry(k).or_default().push(&m.id);
+            }
+        }
+        for (k, ids) in by_key {
+            if ids.len() > 1 {
+                let path = self.memory[ids[0]].source.path.clone();
+                found.push((
+                    path,
+                    format!(
+                        "notes {} all claim key `{k}`; neither wins until one supersedes the others",
+                        ids.iter().map(|i| format!("`{i}`")).collect::<Vec<_>>().join(", ")
+                    ),
+                ));
+            }
+        }
         if let Some(cycle) = self.dependency_cycle() {
             let path = self.tasks[&cycle[0]].source.path.clone();
             found.push((path, format!("dependency cycle: {}", cycle.join(" -> "))));
@@ -610,6 +670,24 @@ impl Intent {
             .filter(move |q| q.state == QuestionState::Open && q.blocks.iter().any(|b| b == task))
     }
 
+    /// Note id -> the current note that supersedes it. Derived on every
+    /// read, so reverting the superseding commit brings the old note back.
+    pub fn superseded(&self) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        for m in self
+            .memory
+            .values()
+            .filter(|m| m.state == MemoryState::Current)
+        {
+            for s in &m.supersedes {
+                if s != &m.id && self.memory.contains_key(s) {
+                    out.entry(s.clone()).or_insert_with(|| m.id.clone());
+                }
+            }
+        }
+        out
+    }
+
     pub fn ids(&self, kind: Kind) -> BTreeSet<String> {
         match kind {
             Kind::Task => self.tasks.keys().cloned().collect(),
@@ -619,6 +697,14 @@ impl Intent {
             Kind::Memory => self.memory.keys().cloned().collect(),
         }
     }
+}
+
+/// A memory note: protected like every `.kitsu/` file, but a proposal of
+/// something learned rather than a change to what is required. Review
+/// shows the two differently so reviewers don't learn to wave rule changes
+/// through.
+pub fn is_memory_note(path: &str) -> bool {
+    matches!(classify(path), Some((Kind::Memory, _)))
 }
 
 pub fn classify(path: &str) -> Option<(Kind, &str)> {
@@ -729,6 +815,11 @@ struct MemoryFront {
     anchors: Vec<String>,
     by: Option<String>,
     run: Option<String>,
+    state: Option<String>,
+    #[serde(default)]
+    supersedes: Vec<String>,
+    key: Option<String>,
+    reason: Option<String>,
 }
 
 /// Also used for personal notes outside the repository.
@@ -747,6 +838,11 @@ pub fn parse_memory(id: &str, front: &str, body: &str, source: Source) -> Result
     if let Some(r) = &f.run {
         valid_id(r).map_err(|e| format!("`run` must be a run id: {e}"))?;
     }
+    let state = match f.state.as_deref().unwrap_or("current") {
+        "current" => MemoryState::Current,
+        "retired" => MemoryState::Retired,
+        other => return Err(format!("unknown memory state `{other}` (current, retired)")),
+    };
     Ok(Memory {
         id: id.to_string(),
         title: f
@@ -757,6 +853,10 @@ pub fn parse_memory(id: &str, front: &str, body: &str, source: Source) -> Result
         anchors: Scope::new(f.anchors),
         by: f.by,
         run: f.run,
+        state,
+        supersedes: f.supersedes,
+        key: f.key.filter(|k| !k.trim().is_empty()),
+        reason: f.reason,
         body: body.to_string(),
         source,
     })

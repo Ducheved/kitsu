@@ -35,6 +35,9 @@
   const needsApproval = $derived(!!review?.approval_token && !approved);
   const empty = $derived(!!review && review.files.length === 0);
 
+  // Same rule as intent::is_memory_note: a file directly in .kitsu/memory/.
+  const isNote = (p: string) => /^\.kitsu\/memory\/[^/]+\.md$/.test(p);
+
   export async function accept(closeTask = true) {
     if (!review || busy || empty) return;
     if (needsApproval) {
@@ -115,7 +118,7 @@
       {#each review.files as f (f.path)}
         <button class="file" onclick={() => app.go({ kind: "diff", run: run.id, path: f.path })}>
           <span class="mono path">{f.path}</span>
-          {#if review.protected.includes(f.path)}<span class="pill warn">{t("review.protected")}</span>{/if}
+          {#if review.protected.includes(f.path)}<span class="pill warn">{isNote(f.path) ? t("review.note") : t("review.protected")}</span>{/if}
           <span class="n mono">{#if f.added === null}{t("review.binary")}{:else}<span class="tone-ok">+{f.added}</span> <span class="tone-bad">−{f.removed}</span>{/if}</span>
         </button>
       {/each}
@@ -133,7 +136,7 @@
     {#if review.approval_token}
       <label class="approve">
         <input type="checkbox" bind:checked={approved} />
-        <span>{t("review.approve", { paths: review.protected.join(", ") })} <strong>{t("review.approveStrong")}</strong></span>
+        <span>{t(review.protected.every(isNote) ? "review.approveNotes" : "review.approve", { paths: review.protected.join(", ") })} <strong>{t("review.approveStrong")}</strong></span>
       </label>
     {/if}
   {/if}
