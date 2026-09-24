@@ -161,3 +161,45 @@ A note on "Ouroboros": the original brief for this project meant a private
 Agent OS project whose source wasn't available here. The public paper above
 is a different project with the same name; its lessons are included for
 what they're worth, not as a stand-in.
+
+## Harness, memory and orchestration code, read in September 2026
+
+Sixteen repositories read at their HEAD on 2026-09-24, for mechanisms and
+for the hacks that stand in for missing contracts. The findings that
+changed Kitsu are in `docs/architecture-review.md`; the separation they
+argue for is decision `dag-state-memory`.
+
+- **Coding harnesses** (Codex, OpenCode, Pi, Cline, Grok Build, DeepSeek
+  Harness). What survives compaction differs per agent: Codex keeps user
+  messages verbatim up to 20k tokens (none in its token-budget mode),
+  OpenCode and Pi summarise all but a recent tail. In all of them rules
+  files are re-rendered, not summarised. Completion is a model claim
+  (Codex `/goal`), or an LLM panel that fails open (Grok). Permissions are
+  keyed on tool names (OpenCode's read-only agents keep `bash`), default to
+  allow (OpenCode, Cline), or enforce read-only with command blacklists
+  (Cline). Worth taking: Codex Guardian's failure semantics (fail closed,
+  stale-authorisation check, circuit breaker), Pi's `replay: never|safe`
+  tool contract, Grok's deterministic post-compaction reminder, DeepSeek's
+  "a rule in AGENTS.md names the script that enforces it".
+- **Memory runtimes** (Letta, Hermes). Both run a background writer that
+  rewrites what the next session loads, merged without human review by
+  default, and both let memory hold executable procedures. Hermes's own
+  compaction eval found Jev-based compaction no better than recency at
+  equal budget, and a mechanical identifier index beating the summariser on
+  exact facts.
+- **Memory systems** (mem0, Graphiti/Zep, cognee). mem0's open-source write
+  path is add-only and never resolves contradictions; Graphiti's bi-temporal
+  invalidation is real but switches itself off when a date is missing, and
+  default search returns invalidated facts; cognee's supersession tags are
+  read by nothing. None of their benchmarks (DMR, LoCoMo, LongMemEval,
+  BEAM) tests facts tied to code that go stale when the code changes.
+- **Orchestration** (LangGraph, Temporal via pydantic-ai, AG2). The
+  recurring failure is one structure doing two jobs: the transcript as the
+  plan, the log and the memory (AG2 classic, the Temporal example), a
+  message channel that is state and memory at once (LangGraph), writable
+  context that routing reads (AG2's `context_vars`).
+- **Docs** (Graphify, Structurizr, LikeC4, adr-tools, MADR). Graph
+  communities churn too much to be architecture elements (one added line
+  moved 14% of nodes); no existing C4 format parses without a JVM or a
+  young grammar, so a Kitsu-native model with checks against code is
+  proposed, exporting to LikeC4 and Mermaid.
