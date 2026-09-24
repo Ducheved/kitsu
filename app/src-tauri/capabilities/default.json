@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window gets Kitsu's own commands and event listening. No filesystem, shell or HTTP plugins: every privileged action is a typed command in src/commands.rs.",
+  "windows": ["main"],
+  "permissions": ["core:event:default", "core:window:allow-set-title"]
+}

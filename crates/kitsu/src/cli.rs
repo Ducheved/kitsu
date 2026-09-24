@@ -533,7 +533,10 @@ fn status(ws: &Workspace, json: bool) -> Result<()> {
     if !d.items.is_empty() && seen > 0 {
         println!("{}", paint("Since you last looked", BOLD));
         for i in d.items.iter().take(8) {
-            println!("  {}", i.text);
+            match &i.task {
+                Some(t) => println!("  {t}: {}", i.text),
+                None => println!("  {}", i.text),
+            }
         }
         println!();
     }

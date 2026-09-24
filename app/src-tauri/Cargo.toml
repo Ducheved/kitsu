@@ -1,0 +1,26 @@
+[package]
+name = "kitsu-app"
+version = "0.1.0"
+description = "Kitsu desktop app"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+kitsu = { path = "../../crates/kitsu" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2.11", features = [] }
+
+[lints]
+workspace = true
+
+[features]
+# Embed the built frontend (app/dist) instead of loading the dev server.
+# `npm run tauri build` turns this on; plain `cargo build` for local runs:
+#   cargo build -p kitsu-app --features custom-protocol
+custom-protocol = ["tauri/custom-protocol"]

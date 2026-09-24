@@ -28,6 +28,7 @@ pub const DEFAULT_BUDGET: usize = 24_000;
 pub struct Included {
     pub kind: &'static str,
     pub id: String,
+    pub title: String,
     pub path: String,
     pub content_id: String,
     pub why: String,
@@ -85,6 +86,7 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
     included.push(Included {
         kind: "task",
         id: task.id.clone(),
+        title: task.title.clone(),
         path: task.source.path.clone(),
         content_id: task.source.content_id.clone(),
         why: "the task".into(),
@@ -178,6 +180,7 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
             included.push(Included {
                 kind: "invariant",
                 id: inv.id.clone(),
+                title: inv.title.clone(),
                 path: inv.source.path.clone(),
                 content_id: inv.source.content_id.clone(),
                 why,
@@ -229,6 +232,7 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
             included: vec![Included {
                 kind: "decision",
                 id: d.id.clone(),
+                title: d.title.clone(),
                 path: d.source.path.clone(),
                 content_id: d.source.content_id.clone(),
                 why,
@@ -263,6 +267,7 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
             included: vec![Included {
                 kind: "question",
                 id: q.id.clone(),
+                title: q.title.clone(),
                 path: q.source.path.clone(),
                 content_id: q.source.content_id.clone(),
                 why: "blocks this task".into(),
