@@ -1,0 +1,11 @@
+[checks.retries]
+run = "python3 -m unittest -q test_retries"
+timeout = "1m"
+
+[checks.idempotency]
+run = "python3 -m unittest -q test_idempotency"
+timeout = "1m"
+scope = ["payments.py", "fake_upstream.py", "test_idempotency.py"]
+
+[protect]
+paths = ["test_*.py", "fake_upstream.py"]

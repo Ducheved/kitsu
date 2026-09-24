@@ -1,0 +1,23 @@
+[[steps]]
+say = "Adding a retry limit and idempotency keys."
+[[steps]]
+write = { path = "payments.py", content = '''
+"""Charges a card through an upstream payment API."""
+
+import uuid
+
+
+class Timeout(Exception):
+    pass
+
+
+def charge(upstream, card, amount):
+    for attempt in range(3):
+        try:
+            return upstream.post("/charges", card=card, amount=amount, idempotency_key=str(uuid.uuid4()))
+        except Timeout:
+            if attempt == 2:
+                raise
+''' }
+[[steps]]
+say = "Done. Retries are bounded and every request has an idempotency key."

@@ -1,0 +1,577 @@
+//! The brief: what an agent is told when it starts a task.
+//!
+//! Compiled, not remembered. Every run gets a fresh brief built from intent
+//! at the run's base commit plus what the store knows about earlier
+//! attempts. No model is involved and the output is deterministic for the
+//! same inputs, which is what makes a task transferable between agents:
+//! agent B gets the same constraints agent A got, plus A's recorded result.
+//!
+//! The brief says why each item is in it and lists what was left out for
+//! space and how to get it. It never summarizes a source into something
+//! stronger than the source: quoted rules link back to their files.
+
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+
+use serde::Serialize;
+
+use crate::check::status_at;
+use crate::git::Git;
+use crate::intent::{DecisionState, Intent, InvariantState, QuestionState, Task};
+use crate::run::RunState;
+use crate::status::required_checks;
+use crate::store::{RunRow, Store};
+
+pub const DEFAULT_BUDGET: usize = 24_000;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Included {
+    pub kind: &'static str,
+    pub id: String,
+    pub path: String,
+    pub content_id: String,
+    pub why: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Omitted {
+    pub kind: &'static str,
+    pub id: String,
+    pub reason: String,
+    pub reacquire: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Brief {
+    pub task: String,
+    pub markdown: String,
+    pub included: Vec<Included>,
+    pub omitted: Vec<Omitted>,
+    /// Intent files that failed to parse. Always shown, never trimmed.
+    pub problems: Vec<String>,
+}
+
+pub struct Context<'a> {
+    pub intent: &'a Intent,
+    /// Needed to report check status at the base and the shape of earlier
+    /// attempts. Optional so a brief can be printed outside a repo.
+    pub git: Option<&'a Git>,
+    pub store: Option<&'a Store>,
+    /// Commit the agent starts from.
+    pub base: Option<&'a str>,
+    pub worktree: Option<&'a str>,
+    pub run: Option<&'a RunRow>,
+    pub budget: usize,
+}
+
+struct Section {
+    title: String,
+    body: String,
+    included: Vec<Included>,
+    kind: &'static str,
+    id: String,
+    reacquire: String,
+}
+
+pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
+    let intent = cx.intent;
+    let mut out = String::new();
+    let mut included = Vec::new();
+    let mut omitted = Vec::new();
+
+    let _ = writeln!(out, "# {}", task.title);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Task `{}` ({}).", task.id, task.source.path);
+    included.push(Included {
+        kind: "task",
+        id: task.id.clone(),
+        path: task.source.path.clone(),
+        content_id: task.source.content_id.clone(),
+        why: "the task".into(),
+    });
+    if !task.body.trim().is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "{}", task.body.trim_end());
+    }
+
+    // ---- required: done means ----
+    let _ = writeln!(out, "\n## Done means");
+    let base_tree = match (cx.git, cx.base) {
+        (Some(g), Some(b)) => g.tree_of(b).ok(),
+        _ => None,
+    };
+    let reqs = required_checks(intent, task, None);
+    if reqs.is_empty() {
+        let _ = writeln!(
+            out,
+            "- No checks are defined for this task. A human will judge the change by reading it."
+        );
+    }
+    for r in &reqs {
+        let def = &intent.config.checks[&r.name];
+        let at_base = match (cx.git, cx.store, &base_tree) {
+            (Some(g), Some(s), Some(t)) => status_at(g, s, def, t)
+                .ok()
+                .map(|st| format!(" On your base commit it is currently: {}.", st.word())),
+            _ => None,
+        };
+        let _ = writeln!(
+            out,
+            "- Check `{}` passes: `{}` (required by {}).{}",
+            r.name,
+            def.run,
+            r.why.join(", "),
+            at_base.unwrap_or_default()
+        );
+    }
+    let _ = writeln!(
+        out,
+        "- A human reviews and accepts the change. You cannot mark the task done yourself; Kitsu runs the checks itself after you finish."
+    );
+
+    // ---- required: broken intent ----
+    let problems: Vec<String> = intent
+        .problems
+        .iter()
+        .map(|p| format!("{}: {}", p.path, p.detail))
+        .collect();
+    if !problems.is_empty() {
+        let _ = writeln!(out, "\n## Warning: some rule files could not be read");
+        let _ = writeln!(
+            out,
+            "The constraints in these files are NOT in this brief. Do not assume they don't exist; ask if your change might touch them."
+        );
+        for p in &problems {
+            let _ = writeln!(out, "- {p}");
+        }
+    }
+
+    // ---- required: invariants in scope ----
+    let invariants: Vec<_> = intent
+        .invariants
+        .values()
+        .filter(|i| i.state == InvariantState::Active && i.scope.may_overlap(&task.scope))
+        .collect();
+    if !invariants.is_empty() {
+        let _ = writeln!(out, "\n## Must hold");
+        for inv in &invariants {
+            let enforcement = if inv.checks.is_empty() {
+                "not machine-checked; the reviewer will look for it".to_string()
+            } else {
+                format!(
+                    "checked by {}",
+                    inv.checks
+                        .iter()
+                        .map(|c| format!("`{c}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            let _ = writeln!(out, "- **{}** (`{}`, {enforcement})", inv.title, inv.id);
+            let why = scope_reason(&task.scope, &inv.scope);
+            for line in excerpt(&inv.body, 12).lines() {
+                let _ = writeln!(out, "  {line}");
+            }
+            if let Some(d) = &inv.decision {
+                let _ = writeln!(out, "  Comes from decision `{d}`.");
+            }
+            included.push(Included {
+                kind: "invariant",
+                id: inv.id.clone(),
+                path: inv.source.path.clone(),
+                content_id: inv.source.content_id.clone(),
+                why,
+            });
+        }
+    }
+
+    // ---- optional sections, in priority order ----
+    let mut optional: Vec<Section> = Vec::new();
+
+    let linked: BTreeSet<&str> = invariants
+        .iter()
+        .filter_map(|i| i.decision.as_deref())
+        .collect();
+    for d in intent
+        .decisions
+        .values()
+        .filter(|d| d.state != DecisionState::Superseded)
+    {
+        let by_link = linked.contains(d.id.as_str());
+        let by_scope = !d.scope.is_everything() && d.scope.may_overlap(&task.scope);
+        let global = d.scope.is_everything() && !by_link;
+        if !(by_link || by_scope || global) {
+            continue;
+        }
+        let mut body = String::new();
+        let settled = if d.state == DecisionState::Proposed {
+            " (proposed, not settled)"
+        } else {
+            ""
+        };
+        let _ = writeln!(body, "- **{}**{settled} (`{}`)", d.title, d.id);
+        for line in excerpt(&d.body, 10).lines() {
+            let _ = writeln!(body, "  {line}");
+        }
+        for r in &d.rejected {
+            let _ = writeln!(body, "  - Rejected: {r}");
+        }
+        let why = if by_link {
+            "linked from an invariant in scope".to_string()
+        } else if by_scope {
+            scope_reason(&task.scope, &d.scope)
+        } else {
+            "applies to the whole repository".into()
+        };
+        optional.push(Section {
+            title: "Decisions that apply".into(),
+            body,
+            included: vec![Included {
+                kind: "decision",
+                id: d.id.clone(),
+                path: d.source.path.clone(),
+                content_id: d.source.content_id.clone(),
+                why,
+            }],
+            kind: "decision",
+            id: d.id.clone(),
+            reacquire: format!("read {}", d.source.path),
+        });
+    }
+
+    for q in intent
+        .questions
+        .values()
+        .filter(|q| q.blocks.iter().any(|b| b == &task.id))
+    {
+        let mut body = String::new();
+        match (&q.state, &q.answer) {
+            (QuestionState::Answered, Some(a)) => {
+                let _ = writeln!(body, "- {} (`{}`)\n  Answer: {}", q.title, q.id, a.trim());
+            }
+            _ => {
+                let _ = writeln!(
+                    body,
+                    "- {} (`{}`) is still OPEN. Don't guess the answer; if your change depends on it, stop and say so.",
+                    q.title, q.id
+                );
+            }
+        }
+        optional.push(Section {
+            title: "Questions about this task".into(),
+            body,
+            included: vec![Included {
+                kind: "question",
+                id: q.id.clone(),
+                path: q.source.path.clone(),
+                content_id: q.source.content_id.clone(),
+                why: "blocks this task".into(),
+            }],
+            kind: "question",
+            id: q.id.clone(),
+            reacquire: format!("read {}", q.source.path),
+        });
+    }
+
+    if let (Some(store), Some(git)) = (cx.store, cx.git) {
+        let current = cx.run.map(|r| r.id.as_str());
+        let attempts: Vec<RunRow> = store
+            .runs_for_task(&task.id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| Some(r.id.as_str()) != current)
+            .take(3)
+            .collect();
+        for r in attempts {
+            let body = describe_attempt(git, store, &r);
+            optional.push(Section {
+                title: "Earlier attempts".into(),
+                body,
+                included: vec![],
+                kind: "run",
+                id: r.id.clone(),
+                reacquire: format!("kitsu show {}", r.id),
+            });
+        }
+    }
+
+    let mut last_title = String::new();
+    for s in optional {
+        let needed = s.body.len()
+            + if s.title != last_title {
+                s.title.len() + 5
+            } else {
+                0
+            };
+        if out.len() + needed > cx.budget {
+            omitted.push(Omitted {
+                kind: s.kind,
+                id: s.id,
+                reason: "over the brief budget".into(),
+                reacquire: s.reacquire,
+            });
+            continue;
+        }
+        if s.title != last_title {
+            let _ = writeln!(out, "\n## {}", s.title);
+            last_title = s.title.clone();
+        }
+        out.push_str(&s.body);
+        included.extend(s.included);
+    }
+
+    // ---- continuation and note ----
+    if let Some(run) = cx.run {
+        if let Some(from) = &run.from_run {
+            let _ = writeln!(out, "\n## You are continuing earlier work");
+            let _ = writeln!(
+                out,
+                "Your worktree already contains the changes from run `{from}`. Build on them; don't start over unless they are wrong."
+            );
+        }
+        if let Some(note) = run.note.as_deref().filter(|n| !n.trim().is_empty()) {
+            let _ = writeln!(out, "\n## Note from the human who started this run");
+            let _ = writeln!(out, "{}", note.trim());
+        }
+    }
+
+    // ---- required: working agreement ----
+    let _ = writeln!(out, "\n## How to work here");
+    if let (Some(wt), Some(base)) = (cx.worktree, cx.base) {
+        let _ = writeln!(
+            out,
+            "- You are in an isolated git worktree at `{wt}`, based on `{}`. Only edit files inside it.",
+            short(base)
+        );
+    }
+    let _ = writeln!(
+        out,
+        "- If you need a decision from a human, write `.kitsu/questions/<short-name>.md` (front matter: `title`, `blocks = [\"{}\"]`) and stop.",
+        task.id
+    );
+    let _ = writeln!(
+        out,
+        "- If you make a design decision, write or update `.kitsu/decisions/<short-name>.md` with `state = \"proposed\"`. It is reviewed separately from your code."
+    );
+    let _ = writeln!(
+        out,
+        "- Changes under `.kitsu/` and other protected paths are shown to the reviewer as rule changes. Weakening a check or an invariant to get green will be seen."
+    );
+    let _ = writeln!(
+        out,
+        "- You can commit or leave changes uncommitted; Kitsu snapshots the worktree when you finish."
+    );
+
+    if !omitted.is_empty() {
+        let _ = writeln!(out, "\n## Left out of this brief");
+        for o in &omitted {
+            let _ = writeln!(
+                out,
+                "- {} `{}` ({}); to read it: `{}`",
+                o.kind, o.id, o.reason, o.reacquire
+            );
+        }
+    }
+
+    Brief {
+        task: task.id.clone(),
+        markdown: out,
+        included,
+        omitted,
+        problems,
+    }
+}
+
+fn describe_attempt(git: &Git, store: &Store, r: &RunRow) -> String {
+    let mut s = String::new();
+    let outcome = match r.state {
+        RunState::Finished => format!("finished ({})", r.stop_reason.as_deref().unwrap_or("?")),
+        other => other.as_str().to_string(),
+    };
+    let resolution = r
+        .resolution
+        .as_deref()
+        .map(|x| format!(", {x}"))
+        .unwrap_or_default();
+    let _ = writeln!(s, "- Run `{}` by {}: {outcome}{resolution}.", r.id, r.agent);
+    if let Some(d) = &r.detail {
+        let _ = writeln!(s, "  Detail: {d}");
+    }
+    if let Some(snap) = &r.snapshot
+        && let Ok(stats) = git.numstat(&r.base, snap)
+        && !stats.is_empty()
+    {
+        let files: Vec<String> = stats
+            .iter()
+            .take(8)
+            .map(|f| match (f.added, f.removed) {
+                (Some(a), Some(d)) => format!("{} (+{a} -{d})", f.path),
+                _ => format!("{} (binary)", f.path),
+            })
+            .collect();
+        let more = stats.len().saturating_sub(8);
+        let more = if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        };
+        let _ = writeln!(s, "  Changed: {}{more}.", files.join(", "));
+    }
+    let evidence = store.evidence_for_run(&r.id).unwrap_or_default();
+    if !evidence.is_empty() {
+        let results: Vec<String> = evidence
+            .iter()
+            .map(|e| format!("{} {}", e.check_name, e.outcome.as_str()))
+            .collect();
+        let _ = writeln!(s, "  Checks: {}.", results.join(", "));
+    }
+    if let Some(n) = r.note.as_deref().filter(|n| !n.trim().is_empty()) {
+        let _ = writeln!(s, "  Note given to it: {}", n.trim());
+    }
+    s
+}
+
+fn scope_reason(task: &crate::scope::Scope, other: &crate::scope::Scope) -> String {
+    if other.is_everything() {
+        "applies to the whole repository".into()
+    } else if task.is_everything() {
+        format!(
+            "task has no declared scope; this covers {}",
+            other.globs().join(", ")
+        )
+    } else {
+        format!(
+            "task scope {} overlaps {}",
+            task.globs().join(", "),
+            other.globs().join(", ")
+        )
+    }
+}
+
+fn excerpt(body: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = body.trim().lines().collect();
+    if lines.len() <= max_lines {
+        return lines.join("\n");
+    }
+    let mut s = lines[..max_lines].join("\n");
+    let _ = write!(s, "\n({} more lines in the file)", lines.len() - max_lines);
+    s
+}
+
+fn short(oid: &str) -> &str {
+    &oid[..oid.len().min(10)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn intent(files: &[(&str, &str)]) -> Intent {
+        Intent::from_files(
+            files
+                .iter()
+                .map(|(p, c)| (p.to_string(), c.as_bytes().to_vec()))
+                .collect(),
+        )
+    }
+
+    fn fixture() -> Intent {
+        intent(&[
+            (
+                ".kitsu/kitsu.toml",
+                "[checks.unit]\nrun = \"cargo test\"\n[checks.idem]\nrun = \"cargo test idem\"\n",
+            ),
+            (
+                ".kitsu/tasks/retry.md",
+                "+++\ntitle = \"Bound retries\"\nscope = [\"src/client/**\"]\nchecks = [\"unit\"]\n+++\nUpstream times out.\n",
+            ),
+            (
+                ".kitsu/invariants/idem.md",
+                "+++\ntitle = \"Stable idempotency key\"\nscope = [\"src/client/**\"]\nchecks = [\"idem\"]\ndecision = \"bounded\"\n+++\nKey comes from the operation, never the attempt.\n",
+            ),
+            (
+                ".kitsu/invariants/ui.md",
+                "+++\ntitle = \"UI never blocks\"\nscope = [\"app/**\"]\n+++\n",
+            ),
+            (
+                ".kitsu/decisions/bounded.md",
+                "+++\ntitle = \"At most 3 attempts\"\nrejected = [\"infinite retry: amplifies outages\"]\nscope = [\"src/client/**\"]\n+++\n",
+            ),
+            (
+                ".kitsu/questions/dedupe.md",
+                "+++\ntitle = \"Does upstream dedupe keys?\"\nblocks = [\"retry\"]\nstate = \"answered\"\nanswer = \"Yes, for 24h.\"\n+++\n",
+            ),
+        ])
+    }
+
+    fn cx(intent: &Intent, budget: usize) -> Context<'_> {
+        Context {
+            intent,
+            git: None,
+            store: None,
+            base: None,
+            worktree: None,
+            run: None,
+            budget,
+        }
+    }
+
+    #[test]
+    fn includes_what_constrains_the_task_and_says_why() {
+        let i = fixture();
+        let b = compile(&cx(&i, DEFAULT_BUDGET), &i.tasks["retry"]);
+        let md = &b.markdown;
+        assert!(md.contains("Stable idempotency key"));
+        assert!(md.contains("Rejected: infinite retry"));
+        assert!(md.contains("Answer: Yes, for 24h."));
+        assert!(
+            md.contains("`idem` passes"),
+            "invariant check becomes required:\n{md}"
+        );
+        assert!(
+            !md.contains("UI never blocks"),
+            "out-of-scope invariant leaked in"
+        );
+        let inv = b
+            .included
+            .iter()
+            .find(|x| x.id == "idem")
+            .expect("idem included");
+        assert!(inv.why.contains("overlaps"));
+    }
+
+    #[test]
+    fn is_deterministic() {
+        let i = fixture();
+        let a = compile(&cx(&i, DEFAULT_BUDGET), &i.tasks["retry"]).markdown;
+        let b = compile(&cx(&i, DEFAULT_BUDGET), &i.tasks["retry"]).markdown;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn budget_drops_optional_sections_but_never_constraints() {
+        let i = fixture();
+        let b = compile(&cx(&i, 100), &i.tasks["retry"]);
+        assert!(
+            b.markdown.contains("Stable idempotency key"),
+            "invariants are never trimmed"
+        );
+        assert!(
+            b.omitted.iter().any(|o| o.id == "bounded"),
+            "{:?}",
+            b.omitted
+        );
+        assert!(b.markdown.contains("Left out of this brief"));
+    }
+
+    #[test]
+    fn broken_rule_files_are_loud() {
+        let i = intent(&[
+            (".kitsu/tasks/t.md", "+++\n+++\n"),
+            (".kitsu/invariants/bad.md", "+++\nnope\n+++\n"),
+        ]);
+        let b = compile(&cx(&i, DEFAULT_BUDGET), &i.tasks["t"]);
+        assert!(b.markdown.contains("could not be read"));
+        assert_eq!(b.problems.len(), 1);
+    }
+}

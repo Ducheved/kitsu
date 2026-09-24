@@ -1,0 +1,36 @@
+[[steps]]
+say = "Reading the charge path and the retry loop first."
+[[steps]]
+plan = ["Bound the retry loop to 3 attempts", "Create the idempotency key once, before the first attempt", "Run the checks"]
+[[steps]]
+read = "payments.py"
+[[steps]]
+write = { path = "payments.py", content = '''
+"""Charges a card through an upstream payment API."""
+
+import random
+import time
+import uuid
+
+
+class Timeout(Exception):
+    pass
+
+
+MAX_ATTEMPTS = 3
+
+
+def charge(upstream, card, amount, sleep=time.sleep):
+    # One key for the whole logical charge. If the upstream charged us and
+    # the response got lost, the retry carries the same key and is a no-op.
+    key = str(uuid.uuid4())
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            return upstream.post("/charges", card=card, amount=amount, idempotency_key=key)
+        except Timeout:
+            if attempt == MAX_ATTEMPTS - 1:
+                raise
+            sleep(random.uniform(0, 0.05 * 2**attempt))
+''' }
+[[steps]]
+say = "Bounded to 3 attempts with jittered backoff; the key is created once per charge so a lost response can't double-charge."
