@@ -874,6 +874,12 @@ fn check(
 }
 
 fn run(ws: &Workspace, opts: Options, quiet: bool, json: bool) -> Result<std::process::ExitCode> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Error::io("starting async runtime", e))?;
+    // Before anything can target this process with a nudge.
+    let mut wake = rt.block_on(async { runner::Wake::install() })?;
     let store = ws.open_store()?;
     let me = Instance::acquire(ws)?;
     let report = recover::recover(ws, &store)?;
@@ -890,11 +896,14 @@ fn run(ws: &Workspace, opts: Options, quiet: bool, json: bool) -> Result<std::pr
             prep.worktree.display()
         );
     }
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| Error::io("starting async runtime", e))?;
-    let driven = rt.block_on(runner::drive(ws, &store, &prep, &opts, !quiet && !json));
+    let driven = rt.block_on(runner::drive(
+        ws,
+        &store,
+        &prep,
+        &opts,
+        !quiet && !json,
+        &mut wake,
+    ));
     // Whatever went wrong after the run row exists goes into the run, so
     // it never sits in "starting" with the reason only on a closed stderr.
     let state = match driven {
@@ -957,7 +966,11 @@ fn stop(ws: &Workspace, run: &str) -> Result<()> {
         print_recovery(&r);
         return Ok(());
     }
-    match store.apply_run_event(run, &RunEvent::CancelRequested)? {
+    let applied = store.apply_run_event(run, &RunEvent::CancelRequested)?;
+    if let Some(owner) = &row.owner {
+        Instance::nudge(ws, owner);
+    }
+    match applied {
         Applied::Moved(_) | Applied::Unchanged => {
             println!("asked run {run} to stop; the agent gets a cancel within ~100ms")
         }
@@ -985,6 +998,9 @@ fn answer(ws: &Workspace, id: &str, text: &str) -> Result<()> {
             )));
         }
         if store.answer_ask(n, text)? {
+            if let Some(owner) = store.run(&ask.run)?.owner {
+                Instance::nudge(ws, &owner);
+            }
             println!("answered");
         } else {
             println!(

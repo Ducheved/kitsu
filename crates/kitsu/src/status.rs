@@ -159,18 +159,16 @@ pub fn verdict(
     task: &Task,
     run: &RunRow,
 ) -> Result<(Verdict, Vec<(String, CheckStatus)>)> {
-    let Some(snapshot) = &run.snapshot else {
+    let (Some(tree), Some(changed)) = (&run.snapshot_tree, &run.changed) else {
         return Ok((Verdict::Unknown, Vec::new()));
     };
-    let changed = git.changed_paths(&run.base, snapshot)?;
     if changed.is_empty() {
         return Ok((Verdict::Empty, Vec::new()));
     }
-    let tree = git.tree_of(snapshot)?;
     let mut results = Vec::new();
-    for req in required_checks(intent, task, Some(&changed)) {
+    for req in required_checks(intent, task, Some(changed)) {
         let def: &CheckDef = &intent.config.checks[&req.name];
-        results.push((req.name, status_at(git, store, def, &tree)?));
+        results.push((req.name, status_at(git, store, def, tree)?));
     }
     let v = if results.iter().any(|(_, s)| matches!(s, CheckStatus::Current { outcome, .. } | CheckStatus::Carried { outcome, .. } if *outcome != crate::store::CheckOutcome::Pass)) {
         Verdict::Failing

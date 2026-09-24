@@ -44,7 +44,41 @@ fn cancel_grace() -> Duration {
         .unwrap_or(CANCEL_GRACE)
 }
 const EXIT_GRACE: Duration = Duration::from_secs(5);
-const TICK: Duration = Duration::from_millis(100);
+/// Safety-net poll. Cancels and answers normally arrive as a nudge (see
+/// `Wake`); the tick only covers a lost signal or a platform without one.
+/// At 10 Hz, 100 idle workers cost 8% of a core; at 1 Hz, under 1%.
+const TICK: Duration = Duration::from_millis(1000);
+
+/// Wakes the worker when someone records a cancel or an answer for its run.
+/// Installed before the run exists: SIGUSR1's default action is to kill
+/// the process, so a stop that races the start must find a handler.
+pub struct Wake {
+    #[cfg(unix)]
+    sig: tokio::signal::unix::Signal,
+}
+
+impl Wake {
+    /// Call inside the Tokio runtime.
+    pub fn install() -> Result<Wake> {
+        #[cfg(unix)]
+        {
+            let sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+                .map_err(|e| Error::io("installing the wake-up signal handler", e))?;
+            Ok(Wake { sig })
+        }
+        #[cfg(not(unix))]
+        Ok(Wake {})
+    }
+
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        {
+            self.sig.recv().await;
+        }
+        #[cfg(not(unix))]
+        std::future::pending::<()>().await
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Policy {
@@ -189,6 +223,7 @@ pub async fn drive(
     prep: &Prepared,
     opts: &Options,
     echo: bool,
+    wake: &mut Wake,
 ) -> Result<RunState> {
     let id = prep.id.as_str();
     let log_path = run_dir(ws, id).join("agent.log");
@@ -278,7 +313,10 @@ pub async fn drive(
         tokio::select! {
             biased;
             msg = incoming.recv() => match msg {
-                Some(Incoming::Update(p)) => rec.update(acp::parse_update(&p)),
+                Some(Incoming::Update(p)) => {
+                    rec.update(acp::parse_update(&p));
+                    rec.flush_if_due(store)?;
+                }
                 Some(Incoming::Permission { id: rpc, params }) => {
                     rec.flush(store)?;
                     let decision = decide(opts.policy, &params, &prep.worktree);
@@ -334,20 +372,14 @@ pub async fn drive(
             }
             _ = tick.tick() => {
                 rec.flush_if_due(store)?;
-                let v = store.data_version()?;
-                if v != version {
-                    version = v;
-                    let run = store.run(id)?;
-                    if run.state == RunState::Stopping && cancel_sent.is_none() {
-                        send_cancel(&client, &session, store, &mut asks, &mut cancel_sent).await?;
-                    }
-                    answer_asks(&client, store, &mut asks).await?;
+                if let Some(end) = control(&client, &session, store, id, &mut asks, &mut cancel_sent, &mut version, &mut child, false).await? {
+                    break end;
                 }
-                if let Some(at) = cancel_sent
-                    && at.elapsed() > cancel_grace() {
-                        kill_group(&mut child).await;
-                        break RunEvent::Exited(format!("agent did not stop within {}s of cancel; killed", cancel_grace().as_secs_f32()));
-                    }
+            }
+            _ = wake.recv() => {
+                if let Some(end) = control(&client, &session, store, id, &mut asks, &mut cancel_sent, &mut version, &mut child, true).await? {
+                    break end;
+                }
             }
         }
     };
@@ -451,6 +483,41 @@ where
             }
         }
     }
+}
+
+/// React to what others wrote about this run: a cancel, answers to asks,
+/// and the cancel grace period running out.
+#[allow(clippy::too_many_arguments)]
+async fn control(
+    client: &Client,
+    session: &str,
+    store: &Store,
+    id: &str,
+    asks: &mut Vec<PendingAsk>,
+    cancel_sent: &mut Option<Instant>,
+    version: &mut i64,
+    child: &mut tokio::process::Child,
+    force: bool,
+) -> Result<Option<RunEvent>> {
+    let v = store.data_version()?;
+    if force || v != *version {
+        *version = v;
+        let run = store.run(id)?;
+        if run.state == RunState::Stopping && cancel_sent.is_none() {
+            send_cancel(client, session, store, asks, cancel_sent).await?;
+        }
+        answer_asks(client, store, asks).await?;
+    }
+    if let Some(at) = *cancel_sent
+        && at.elapsed() > cancel_grace()
+    {
+        kill_group(child).await;
+        return Ok(Some(RunEvent::Exited(format!(
+            "agent did not stop within {}s of cancel; killed",
+            cancel_grace().as_secs_f32()
+        ))));
+    }
+    Ok(None)
 }
 
 struct PendingAsk {
@@ -615,22 +682,22 @@ pub fn finish(ws: &Workspace, store: &Store, id: &str, verify: bool) -> Result<O
         &format!("{title}\n\nKitsu-Run: {id}\nKitsu-Task: {}", run.task),
         &ws.no_hooks(),
     )?;
-    store.set_run_snapshot(id, &snapshot)?;
+    let tree = git.tree_of(&snapshot)?;
+    let changed = git.changed_paths(&run.base, &snapshot)?;
+    store.set_run_snapshot(id, &snapshot, &tree, &changed)?;
     if verify
         && ws.is_trusted()?
         && let Some(task) = intent.tasks.get(&run.task)
+        && !changed.is_empty()
     {
-        let changed = git.changed_paths(&run.base, &snapshot)?;
-        if !changed.is_empty() {
-            let cr = CheckRun {
-                ws,
-                store,
-                dir: &wt,
-                run: Some(id),
-            };
-            for req in required_checks(&intent, task, Some(&changed)) {
-                cr.execute(&intent.config.checks[&req.name])?;
-            }
+        let cr = CheckRun {
+            ws,
+            store,
+            dir: &wt,
+            run: Some(id),
+        };
+        for req in required_checks(&intent, task, Some(&changed)) {
+            cr.execute(&intent.config.checks[&req.name])?;
         }
     }
     Ok(Some(snapshot))

@@ -399,6 +399,187 @@ fn sibling(name: &str) -> PathBuf {
     dir.join(name)
 }
 
+fn cpu_ticks(pid: u32) -> u64 {
+    // utime + stime, fields 14 and 15 of /proc/<pid>/stat (after the comm).
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| {
+            let rest = &s[s.rfind(')')? + 2..];
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            Some(f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?)
+        })
+        .unwrap_or(0)
+}
+
+fn percentile(v: &mut [f64], p: f64) -> f64 {
+    v.sort_by(|a, b| a.total_cmp(b));
+    if v.is_empty() {
+        return 0.0;
+    }
+    v[((v.len() - 1) as f64 * p).round() as usize]
+}
+
+/// The realistic heavy day: `n` agents at once (default 100), each editing a
+/// file, idling, finishing, getting verified. Reports the per-unit costs
+/// that decide whether the machine and the UI stay responsive, against
+/// budgets. Exit code 1 if a budget is blown, so it can gate changes.
+fn stress(n: usize) {
+    let root = temp_repo("stress");
+    let kitsu = sibling("kitsu");
+    std::fs::write(
+        root.join(".kitsu/kitsu.toml"),
+        "[checks.ok]\nrun = \"true\"\n",
+    )
+    .expect("cfg");
+    std::fs::create_dir_all(root.join("src")).expect("src");
+    for i in 0..n {
+        std::fs::write(root.join(format!("src/m{i}.txt")), "v1\n").expect("file");
+        std::fs::write(
+            root.join(format!(".kitsu/tasks/t{i}.md")),
+            format!("+++\ntitle = \"t{i}\"\nscope = [\"src/m{i}.txt\"]\nchecks = [\"ok\"]\n+++\n"),
+        )
+        .expect("task");
+    }
+    let _ = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(&root)
+        .status();
+    let _ = Command::new("git")
+        .args(["commit", "-qm", "init"])
+        .current_dir(&root)
+        .status();
+    let cfg = root.join("cfg");
+    std::fs::create_dir_all(&cfg).expect("cfg");
+    assert!(
+        Command::new(&kitsu)
+            .args(["trust"])
+            .current_dir(&root)
+            .env("KITSU_CONFIG_DIR", &cfg)
+            .output()
+            .expect("trust")
+            .status
+            .success()
+    );
+
+    let t = Instant::now();
+    let mut children = Vec::new();
+    for i in 0..n {
+        let script = root.join(format!("agent{i}.toml"));
+        std::fs::write(
+            &script,
+            format!("[[steps]]\nsay = \"editing\"\n[[steps]]\nwrite = {{ path = \"src/m{i}.txt\", content = \"v2\\n\" }}\n[[steps]]\nsleep_ms = 15000\n"),
+        )
+        .expect("script");
+        children.push(
+            Command::new(&kitsu)
+                .args([
+                    "run",
+                    &format!("t{i}"),
+                    "--agent",
+                    "test",
+                    "--id",
+                    &format!("r{i}"),
+                    "-q",
+                ])
+                .current_dir(&root)
+                .env("KITSU_CONFIG_DIR", &cfg)
+                .env("KITSU_TEST_SCRIPT", &script)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn"),
+        );
+    }
+    let ws = Workspace::discover(&root).expect("ws");
+    let store = ws.open_store().expect("store");
+    let mut started: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    while started.len() < n && t.elapsed().as_secs() < 60 {
+        for r in store.recent_runs(n).expect("runs") {
+            if r.state != kitsu::run::RunState::Starting {
+                started
+                    .entry(r.id)
+                    .or_insert_with(|| t.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut start_ms: Vec<f64> = started.values().copied().collect();
+    // Idle cost: everyone is up and sleeping. Kitsu's workers only.
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    let pids: Vec<u32> = children.iter().map(|c| c.id()).collect();
+    let before: u64 = pids.iter().map(|p| cpu_ticks(*p)).sum();
+    let window = 5.0;
+    std::thread::sleep(std::time::Duration::from_secs_f64(window));
+    let after: u64 = pids.iter().map(|p| cpu_ticks(*p)).sum();
+    let hz = 100.0; // USER_HZ on Linux
+    let idle_core_pct = (after - before) as f64 / hz / window * 100.0;
+    let rss: u64 = pids.iter().map(|p| rss_kib(*p)).sum();
+    let mut failed = 0;
+    for mut c in children {
+        if !c.wait().map(|s| s.success()).unwrap_or(false) {
+            failed += 1;
+        }
+    }
+    let intent = Intent::load_dir(&root).expect("intent");
+    let git = ws.git();
+    let mut refresh = Vec::new();
+    for _ in 0..7 {
+        let t = Instant::now();
+        let views = Snapshot {
+            intent: &intent,
+            git: &git,
+            store: &store,
+        }
+        .tasks()
+        .expect("tasks");
+        refresh.push(t.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(views.len(), n);
+    }
+    let verified = Snapshot {
+        intent: &intent,
+        git: &git,
+        store: &store,
+    }
+    .tasks()
+    .expect("tasks")
+    .iter()
+    .filter(|v| v.reason.contains("checks pass"))
+    .count();
+    let p50 = percentile(&mut start_ms.clone(), 0.5);
+    let p95 = percentile(&mut start_ms, 0.95);
+    let refresh_ms = percentile(&mut refresh, 0.5);
+    // Budgets for this machine class (4 vCPU). See docs/design.md.
+    let budget = [
+        ("failed_runs", failed as f64, 0.0),
+        ("idle_cpu_pct_of_one_core", idle_core_pct, 5.0),
+        ("status_refresh_ms", refresh_ms, 50.0),
+        (
+            "worker_rss_kib_each",
+            (rss / n.max(1) as u64) as f64,
+            12_000.0,
+        ),
+    ];
+    let blown: Vec<&str> = budget
+        .iter()
+        .filter(|(_, v, max)| v > max)
+        .map(|(k, _, _)| *k)
+        .collect();
+    report(
+        "stress",
+        json!({
+            "runs": n, "cpus": std::thread::available_parallelism().map(|p| p.get()).unwrap_or(0),
+            "all_started_after_ms": start_ms.iter().copied().fold(0.0, f64::max), "start_p50_ms": p50, "start_p95_ms": p95,
+            "idle_cpu_pct_of_one_core": idle_core_pct, "worker_rss_kib_total": rss,
+            "status_refresh_ms_p50_with_all_in_review": refresh_ms, "verified_for_review": verified,
+            "failed_runs": failed, "budgets_blown": blown
+        }),
+    );
+    let _ = std::fs::remove_dir_all(root);
+    if !blown.is_empty() {
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let num = |i: usize, d: usize| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
@@ -406,6 +587,7 @@ fn main() {
         Some("state") => state(num(1, 1001)),
         Some("ingest") => ingest(num(1, 1001), num(2, 10)),
         Some("procs") => procs(num(1, 100)),
-        _ => eprintln!("usage: scale state [N] | ingest [STREAMS] [RATE] | procs [N]"),
+        Some("stress") => stress(num(1, 100)),
+        _ => eprintln!("usage: scale state [N] | ingest [STREAMS] [RATE] | procs [N] | stress [N]"),
     }
 }

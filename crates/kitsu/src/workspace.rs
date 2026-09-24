@@ -220,9 +220,43 @@ impl Instance {
                     path.display()
                 ))
             })?;
+            // The pid lets others wake us (see `nudge`). It's only trusted
+            // while the lock is held, and a held lock means this process.
+            let mut f = &file;
+            writeln!(f, "{}", std::process::id())
+                .map_err(|e| Error::io(path.display().to_string(), e))?;
             return Ok(Instance { id, _lock: file });
         }
         Err(Error::Invalid("could not allocate an owner id".into()))
+    }
+
+    /// Tell the process holding `id` to look at the database now instead of
+    /// at its next tick. Used after writing a cancel or an answer, so stop
+    /// feels instant while idle workers only poll about once a second.
+    /// Best effort: if the signal can't be sent, the tick still picks the
+    /// change up.
+    pub fn nudge(ws: &Workspace, id: &str) {
+        #[cfg(unix)]
+        {
+            let path = ws.state.join("owners").join(format!("{id}.lock"));
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                return;
+            };
+            let Some(pid) = text.trim().parse::<u32>().ok() else {
+                return;
+            };
+            if pid == std::process::id() || Instance::liveness(ws, id).ok() != Some(Liveness::Alive)
+            {
+                return;
+            }
+            let _ = std::process::Command::new("kill")
+                .args(["-USR1", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        #[cfg(not(unix))]
+        let _ = (ws, id);
     }
 
     /// Is the process holding `id` still running?

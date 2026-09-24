@@ -47,7 +47,11 @@ CREATE TABLE IF NOT EXISTS runs (
     from_run         TEXT,
     note             TEXT,
     created_at       INTEGER NOT NULL,
-    ended_at         INTEGER
+    ended_at         INTEGER,
+    -- Fixed once the snapshot exists: base..snapshot never changes, so
+    -- status refreshes read these instead of asking git every time.
+    snapshot_tree    TEXT,
+    changed          TEXT
 );
 CREATE INDEX IF NOT EXISTS runs_by_task ON runs(task, created_at);
 CREATE INDEX IF NOT EXISTS runs_live ON runs(state) WHERE state IN ('starting', 'running', 'stopping');
@@ -127,6 +131,9 @@ pub struct RunRow {
     pub note: Option<String>,
     pub created_at: i64,
     pub ended_at: Option<i64>,
+    pub snapshot_tree: Option<String>,
+    /// Paths changed between `base` and `snapshot`.
+    pub changed: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -543,17 +550,24 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_run_snapshot(&self, id: &str, commit: &str) -> Result<()> {
+    pub fn set_run_snapshot(
+        &self,
+        id: &str,
+        commit: &str,
+        tree: &str,
+        changed: &[String],
+    ) -> Result<()> {
         let tx = self.write_tx()?;
+        let list = serde_json::to_string(changed).unwrap_or_else(|_| "[]".into());
         tx.execute(
-            "UPDATE runs SET snapshot = ?2 WHERE id = ?1",
-            params![id, commit],
+            "UPDATE runs SET snapshot = ?2, snapshot_tree = ?3, changed = ?4 WHERE id = ?1",
+            params![id, commit, tree, list],
         )?;
         append_event(
             &tx,
             Some(id),
             "run.snapshot",
-            &serde_json::json!({ "commit": commit }),
+            &serde_json::json!({ "commit": commit, "files": changed.len() }),
         )?;
         tx.commit()?;
         Ok(())
@@ -901,7 +915,7 @@ fn append_event(conn: &Connection, run: Option<&str>, kind: &str, body: &Value) 
     Ok(conn.last_insert_rowid())
 }
 
-const RUN_COLS: &str = "id, task, agent, base, branch, worktree, state, stop_reason, detail, cancel_requested, owner, pid, brief, snapshot, resolution, from_run, note, created_at, ended_at";
+const RUN_COLS: &str = "id, task, agent, base, branch, worktree, state, stop_reason, detail, cancel_requested, owner, pid, brief, snapshot, resolution, from_run, note, created_at, ended_at, snapshot_tree, changed";
 
 fn run_row(r: &Row<'_>) -> rusqlite::Result<RunRow> {
     let state: String = r.get(6)?;
@@ -927,6 +941,10 @@ fn run_row(r: &Row<'_>) -> rusqlite::Result<RunRow> {
         note: r.get(16)?,
         created_at: r.get(17)?,
         ended_at: r.get(18)?,
+        snapshot_tree: r.get(19)?,
+        changed: r
+            .get::<_, Option<String>>(20)?
+            .and_then(|c| serde_json::from_str(&c).ok()),
     })
 }
 
