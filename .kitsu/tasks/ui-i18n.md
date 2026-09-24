@@ -2,6 +2,7 @@
 title = "Speak English, Russian, Japanese, German and French"
 scope = ["app/src/**", "crates/kitsu/src/status.rs", "crates/kitsu/src/digest.rs"]
 checks = ["ui", "test"]
+state = "done"
 +++
 Every string a person reads in the window comes from a translation table,
 picked from the system language with a manual override. Statuses and "since

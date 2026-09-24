@@ -1,7 +1,7 @@
 // Structured state from the Rust side, said in the person's language.
 
 import { i18n, t } from "./i18n/index.svelte";
-import type { CheckStatus, DigestItem, RunState, TaskView } from "./types";
+import type { CheckStatus, DigestItem, RunState, TaskView, Usage } from "./types";
 
 export function statusText(v: TaskView): string {
   const s = v.status;
@@ -100,6 +100,37 @@ export function runWord(state: RunState, stop: string | null, resolution?: strin
     return t("runWord.finishedWith", { reason: stop.replace(/_/g, " ") });
   }
   return t(`runWord.${state}`);
+}
+
+/**
+ * Parameters for a "{tokens} tokens" message. Compact numbers ("1.5K",
+ * "1,5 тыс.") take the plural of a round thousand, which is what they read
+ * as; smaller ones take their own.
+ */
+export function tokenParams(n: number): { tokens: string; n: number } {
+  return { tokens: i18n.compact(n), n: n >= 1000 ? 1000 : n };
+}
+
+/** Tokens a run spent, as far as its agent said. */
+export function spent(u: Usage | null | undefined): number | null {
+  if (!u) return null;
+  if (u.total != null) return u.total;
+  if (u.input == null && u.output == null) return null;
+  return (u.input ?? 0) + (u.output ?? 0);
+}
+
+/** " · 1.5K tokens · $0.02 · 3% of its context window", or a note that nothing was reported. */
+export function usageText(u: Usage | null | undefined): string {
+  const n = spent(u);
+  let out = n == null ? "" : t("act.tokens", tokenParams(n));
+  if (u?.cost != null && u.currency) out += ` · ${i18n.money(u.cost, u.currency)}`;
+  if (u?.context_used != null && u.context_size) out += t("act.context", { pct: i18n.percent(u.context_used / u.context_size) });
+  return out || t("act.silent");
+}
+
+/** Rough token count for text Kitsu wrote itself (briefs). */
+export function estimateTokens(text: string): number {
+  return Math.ceil(new TextEncoder().encode(text).length / 4);
 }
 
 export function duration(ms: number): string {

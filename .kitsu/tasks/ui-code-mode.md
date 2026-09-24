@@ -3,6 +3,7 @@ title = "An editor-first layout for people who live in their editor"
 scope = ["app/src/**", "app/src-tauri/src/commands.rs"]
 checks = ["ui", "test"]
 after = ["ui-i18n"]
+state = "done"
 +++
 Two layouts over the same state. Work: the task list and one task in focus
 (what exists now). Code: file tree, tabs, editor, a status bar, and a thin

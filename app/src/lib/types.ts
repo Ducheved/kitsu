@@ -101,6 +101,21 @@ export interface Run {
   created_at: number;
   ended_at: number | null;
   changed: string[] | null;
+  /** What the agent reported; absent fields were not reported. */
+  usage: Usage | null;
+}
+
+export interface Usage {
+  input?: number;
+  output?: number;
+  cached_read?: number;
+  cached_write?: number;
+  thought?: number;
+  total?: number;
+  context_used?: number;
+  context_size?: number;
+  cost?: number;
+  currency?: string;
 }
 
 export interface RunEvent {

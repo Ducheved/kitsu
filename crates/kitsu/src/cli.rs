@@ -143,6 +143,8 @@ enum Cmd {
     Recover,
     /// Known agents and how they are started.
     Agents,
+    /// Where the tokens went: per agent, per outcome, per task.
+    Stats,
 }
 
 pub fn main() -> std::process::ExitCode {
@@ -264,6 +266,7 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
             Ok(())
         }
         Cmd::Log { run, since, follow } => log(&ws, run, since, follow, json),
+        Cmd::Stats => stats_cmd(&ws, json),
         Cmd::Recover => {
             let store = ws.open_store()?;
             let r = recover::recover(&ws, &store)?;
@@ -1176,6 +1179,107 @@ fn accept(
             std::process::ExitCode::from(2)
         }
     })
+}
+
+fn stats_cmd(ws: &Workspace, json: bool) -> Result<()> {
+    use crate::stats::{self, Totals, short};
+    let store = ws.open_store()?;
+    let runs = store.recent_runs(100_000)?;
+    let blobs = ws.blobs();
+    let s = stats::compute(&runs, |r| {
+        let b = r.brief.as_deref()?;
+        std::fs::metadata(blobs.path(b)).ok().map(|m| m.len())
+    });
+    if json {
+        println!("{}", serde_json::to_string(&s).unwrap_or_default());
+        return Ok(());
+    }
+    if s.all.runs == 0 {
+        println!("no runs yet");
+        return Ok(());
+    }
+    let cost = |t: &Totals| {
+        t.cost
+            .iter()
+            .map(|(c, v)| format!("{v:.2} {c}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let line = |name: &str, t: &Totals| {
+        let cache = t
+            .cache_share()
+            .map(|c| format!("  {:.0}% from cache", c * 100.0))
+            .unwrap_or_default();
+        let silent = t.runs - t.reported;
+        let silent = if silent > 0 {
+            paint(&format!("  ({silent} didn't report)"), DIM)
+        } else {
+            String::new()
+        };
+        let money = cost(t);
+        let money = if money.is_empty() {
+            money
+        } else {
+            format!("  {money}")
+        };
+        println!(
+            "  {name:<12} {:>4} runs  {:>6} tokens  ({} in, {} out){cache}{money}{silent}",
+            t.runs,
+            short(t.spent),
+            short(t.input),
+            short(t.output)
+        );
+    };
+    println!(
+        "{}",
+        paint(
+            &format!(
+                "{} runs, {} reported usage, {} tokens",
+                s.all.runs,
+                s.all.reported,
+                short(s.all.spent)
+            ),
+            BOLD
+        )
+    );
+    if s.all.reported == 0 {
+        println!("none of the agents reported token usage (ACP makes it optional)");
+    }
+    println!("\nby agent");
+    for (a, t) in &s.by_agent {
+        line(a, t);
+    }
+    println!("\nby outcome");
+    for (o, t) in &s.by_outcome {
+        line(o, t);
+    }
+    if let Some(d) = s
+        .by_outcome
+        .get("discarded")
+        .filter(|d| d.spent > 0 && s.all.spent > 0)
+    {
+        println!(
+            "  {} of reported tokens went to attempts you threw away",
+            paint(
+                &format!("{:.0}%", d.spent as f64 * 100.0 / s.all.spent as f64),
+                YELLOW
+            )
+        );
+    }
+    if !s.top_tasks.is_empty() {
+        println!("\ntasks that took the most");
+        for (task, t) in &s.top_tasks {
+            line(task, t);
+        }
+    }
+    if let (Some(median), Some((task, max))) = (s.brief_median, &s.brief_max) {
+        println!(
+            "\nbriefs: median ~{} tokens, largest ~{} ({task}); estimated from size",
+            short(median),
+            short(*max)
+        );
+    }
+    Ok(())
 }
 
 fn log(ws: &Workspace, run: Option<String>, since: i64, follow: bool, json: bool) -> Result<()> {

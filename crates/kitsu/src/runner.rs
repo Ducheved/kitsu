@@ -27,7 +27,7 @@ use crate::git::Git;
 use crate::intent::{Intent, TaskState};
 use crate::run::{RunEvent, RunState};
 use crate::status::required_checks;
-use crate::store::{Applied, NewRun, Store};
+use crate::store::{Applied, NewRun, Store, Usage};
 use crate::util::short_id;
 use crate::workspace::{Instance, Workspace};
 
@@ -359,10 +359,13 @@ pub async fn drive(
             },
             res = &mut prompt => {
                 break match res {
-                    Ok(Ok(v)) => match v["stopReason"].as_str() {
-                        Some(r) => RunEvent::TurnEnded(r.to_string()),
-                        None => RunEvent::ProtocolError(format!("session/prompt returned without stopReason: {v}")),
-                    },
+                    Ok(Ok(v)) => {
+                        rec.turn_usage(&v["usage"]);
+                        match v["stopReason"].as_str() {
+                            Some(r) => RunEvent::TurnEnded(r.to_string()),
+                            None => RunEvent::ProtocolError(format!("session/prompt returned without stopReason: {v}")),
+                        }
+                    }
                     Ok(Err(e)) => match child.try_wait() {
                         Ok(Some(status)) => RunEvent::Exited(format!("agent exited ({status}) during the turn: {e}")),
                         _ => RunEvent::ProtocolError(e.to_string()),
@@ -719,7 +722,8 @@ struct Recorder {
     pending: Vec<(String, Value)>,
     last_flush: Instant,
     thoughts: u64,
-    usage: Option<Value>,
+    usage: Usage,
+    usage_dirty: bool,
     other: HashMap<String, u64>,
 }
 
@@ -735,7 +739,8 @@ impl Recorder {
             pending: Vec::new(),
             last_flush: Instant::now(),
             thoughts: 0,
-            usage: None,
+            usage: Usage::default(),
+            usage_dirty: false,
             other: HashMap::new(),
         }
     }
@@ -801,7 +806,10 @@ impl Recorder {
                 self.pending
                     .push(("agent.plan".into(), json!({ "entries": entries })));
             }
-            Update::Usage(u) => self.usage = Some(u),
+            Update::Usage(u) => {
+                self.usage.apply_update(&u);
+                self.usage_dirty = true;
+            }
             Update::Other(k) => *self.other.entry(k).or_default() += 1,
         }
     }
@@ -823,23 +831,37 @@ impl Recorder {
         {
             self.take_text();
         }
-        if !self.pending.is_empty() && self.last_flush.elapsed() > Duration::from_millis(250) {
+        if (!self.pending.is_empty() || self.usage_dirty)
+            && self.last_flush.elapsed() > Duration::from_millis(250)
+        {
             self.flush(store)?;
         }
         Ok(())
+    }
+
+    /// The `usage` of a `session/prompt` response.
+    fn turn_usage(&mut self, u: &Value) {
+        if u.is_object() {
+            self.usage.apply_turn(u);
+            self.usage_dirty = true;
+        }
     }
 
     fn flush(&mut self, store: &Store) -> Result<()> {
         self.take_text();
         store.append_batch(&self.run, &self.pending)?;
         self.pending.clear();
+        if self.usage_dirty {
+            store.set_run_usage(&self.run, &self.usage)?;
+            self.usage_dirty = false;
+        }
         self.last_flush = Instant::now();
         Ok(())
     }
 
     fn finish(&mut self, store: &Store) -> Result<()> {
         self.flush(store)?;
-        store.append(Some(&self.run), "agent.summary", &json!({ "thoughts": self.thoughts, "usage": self.usage, "unhandled_updates": self.other }))?;
+        store.append(Some(&self.run), "agent.summary", &json!({ "thoughts": self.thoughts, "usage": (!self.usage.is_empty()).then_some(&self.usage), "unhandled_updates": self.other }))?;
         if self.echo {
             eprintln!();
         }

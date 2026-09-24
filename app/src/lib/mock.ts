@@ -125,6 +125,7 @@ function run(partial: Partial<Run> & { id: string; task: string }): Run {
     cancel_requested: false,
     snapshot: null,
     resolution: null,
+    usage: null,
     from_run: null,
     note: null,
     created_at: minutes(12),
@@ -141,7 +142,7 @@ function ev(runId: string, kind: string, body: unknown, at = now()) {
 }
 
 // A finished, verified attempt waiting for review.
-const good = run({ id: "r7k2mq", task: "bounded-retries", state: "finished", stop_reason: "end_turn", snapshot: "c0ffee1", ended_at: minutes(3), created_at: minutes(9), changed: ["payments.py"] });
+const good = run({ id: "r7k2mq", task: "bounded-retries", state: "finished", stop_reason: "end_turn", snapshot: "c0ffee1", ended_at: minutes(3), created_at: minutes(9), changed: ["payments.py"], usage: { input: 18400, output: 2900, cached_read: 61000, total: 82300, context_used: 41000, context_size: 200000, cost: 0.19, currency: "USD" } });
 ev(good.id, "run.state", { to: "running" }, minutes(9));
 ev(good.id, "agent.plan", { entries: [{ content: "Bound the retry loop to 3 attempts", status: "completed" }, { content: "Create the idempotency key once, before the first attempt", status: "completed" }, { content: "Run the checks", status: "completed" }] }, minutes(8));
 ev(good.id, "agent.message", { text: "Reading the charge path and the retry loop first." }, minutes(8));

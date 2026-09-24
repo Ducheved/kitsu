@@ -3,7 +3,7 @@
   import { api, errorText } from "../lib/api";
   import { i18n, t } from "../lib/i18n/index.svelte";
   import { inline, render } from "../lib/md";
-  import { runWord, statusText } from "../lib/status";
+  import { estimateTokens, runWord, statusText, tokenParams } from "../lib/status";
   import type { Ask, Run, TaskDetail } from "../lib/types";
   import Glyph from "./Glyph.svelte";
   import ReviewCard from "./ReviewCard.svelte";
@@ -246,7 +246,7 @@
       <div class="prose">{@html render(detail.task.body)}</div>
     {/if}
 
-    <div class="section-title">{t("section.told")}</div>
+    <div class="section-title">{t("section.told")} <span class="size">{t("told.size", tokenParams(estimateTokens(detail.brief.markdown)))}</span></div>
     <div class="constraints">
       {#if detail.task.checks.length}
         <div class="c-row"><span class="c-kind">{t("told.doneWhen")}</span><span>{@html t("told.doneChecks", { checks: detail.task.checks.map((c) => `<code>${c.replace(/[<>&]/g, "")}</code>`).join(", ") })}</span></div>
@@ -291,6 +291,12 @@
 {/if}
 
 <style>
+  .size {
+    margin-left: 6px;
+    font-weight: 450;
+    text-transform: none;
+    letter-spacing: 0;
+  }
   .page {
     max-width: 820px;
     margin: 0 auto;

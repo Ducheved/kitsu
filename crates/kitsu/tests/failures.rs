@@ -640,3 +640,55 @@ fn a_different_agent_can_continue_from_a_previous_run() {
         "two"
     );
 }
+
+#[test]
+fn token_usage_is_recorded_when_reported_and_never_invented() {
+    let env = Env::new("usage");
+    let reporting = env.script(
+        "reporting",
+        "usage = { input = 1200, output = 300, used = 5000, size = 200000, cost = 0.02 }\n[[steps]]\nsay = \"done\"\n",
+    );
+    let silent = env.script("silent", "[[steps]]\nsay = \"done\"\n");
+    assert!(
+        env.run_with(&reporting, "rtok", &["--no-verify"])
+            .status
+            .success()
+    );
+    assert!(
+        env.run_with(&silent, "rquiet", &["--no-verify"])
+            .status
+            .success()
+    );
+    let store = env.store();
+    let u = store
+        .run("rtok")
+        .expect("run")
+        .usage
+        .expect("usage recorded");
+    assert_eq!(
+        (u.input, u.output, u.total),
+        (Some(1200), Some(300), Some(1500))
+    );
+    assert_eq!((u.context_used, u.context_size), (Some(5000), Some(200000)));
+    assert_eq!((u.cost, u.currency.as_deref()), (Some(0.02), Some("USD")));
+    assert_eq!(
+        store.run("rquiet").expect("run").usage,
+        None,
+        "silence is not zero"
+    );
+
+    let text = env.ok(&["stats"]);
+    assert!(
+        text.contains("2 runs, 1 reported usage, 1.5k tokens"),
+        "{text}"
+    );
+    assert!(text.contains("(1 didn't report)"), "{text}");
+    let json: serde_json::Value =
+        serde_json::from_str(&env.ok(&["stats", "--json"])).expect("json");
+    assert_eq!(json["all"]["spent"], 1500);
+    assert_eq!(json["all"]["reported"], 1);
+    assert!(
+        json["brief_median"].as_u64().unwrap_or(0) > 0,
+        "briefs are measured: {json}"
+    );
+}

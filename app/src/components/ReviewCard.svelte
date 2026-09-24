@@ -2,7 +2,7 @@
   import { app } from "../lib/app.svelte";
   import { api, errorKind, errorText } from "../lib/api";
   import { t } from "../lib/i18n/index.svelte";
-  import { checkWord } from "../lib/status";
+  import { checkWord, spent, tokenParams } from "../lib/status";
   import type { Accepted, Review, Run } from "../lib/types";
   import RunActivity from "./RunActivity.svelte";
 
@@ -89,7 +89,7 @@
     <div>
       <div class="title">
         {t(run.stop_reason === "cancelled" ? "review.stopped" : "review.finished", { agent: run.agent })}
-        {#if review}<span class="hint">· {t("review.files", { n: review.files.length })} · <span class="tone-ok">+{total[0]}</span> <span class="tone-bad">−{total[1]}</span> · <span class="mono">{t("review.onto", { branch: review.target })}</span></span>{/if}
+        {#if review}<span class="hint">· {t("review.files", { n: review.files.length })} · <span class="tone-ok">+{total[0]}</span> <span class="tone-bad">−{total[1]}</span> · <span class="mono">{t("review.onto", { branch: review.target })}</span>{#if spent(run.usage) != null}{" · "}{t("review.tokens", tokenParams(spent(run.usage)!))}{/if}</span>{/if}
       </div>
       {#if empty}
         <div class="verdict hint">{t("review.empty")}</div>

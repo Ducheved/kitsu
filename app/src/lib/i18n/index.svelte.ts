@@ -66,6 +66,19 @@ class I18n {
   list = (items: string[]): string => new Intl.ListFormat(this.locale, { style: "short", type: "conjunction" }).format(items);
 
   number = (n: number): string => new Intl.NumberFormat(this.locale).format(n);
+
+  /** 1500 -> "1.5K" / "1,5 тыс." / "1500": for token counts. */
+  compact = (n: number): string => new Intl.NumberFormat(this.locale, { notation: "compact", maximumFractionDigits: 1 }).format(n);
+
+  percent = (x: number): string => new Intl.NumberFormat(this.locale, { style: "percent", maximumFractionDigits: 0 }).format(x);
+
+  money = (amount: number, currency: string): string => {
+    try {
+      return new Intl.NumberFormat(this.locale, { style: "currency", currency, maximumFractionDigits: amount < 1 ? 3 : 2 }).format(amount);
+    } catch {
+      return `${amount.toFixed(2)} ${currency}`;
+    }
+  };
 }
 
 export const i18n = new I18n();

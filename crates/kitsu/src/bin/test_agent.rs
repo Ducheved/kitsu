@@ -17,6 +17,10 @@
 //! [[steps]]
 //! shell = "cargo test"
 //! ```
+//!
+//! A top-level `usage = { input = 1200, output = 300, used = 5000, size = 200000, cost = 0.02 }`
+//! makes it report token usage the way ACP agents do: a `usage_update`
+//! before the turn ends and a `usage` object on the prompt response.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -35,6 +39,18 @@ struct Script {
     duplicate_response: bool,
     #[serde(default)]
     steps: Vec<Step>,
+    usage: Option<ScriptUsage>,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct ScriptUsage {
+    input: Option<u64>,
+    output: Option<u64>,
+    cached_read: Option<u64>,
+    used: Option<u64>,
+    size: Option<u64>,
+    cost: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -373,8 +389,17 @@ fn main() {
                     agent.say("No script given (set KITSU_TEST_SCRIPT). Nothing to do.");
                 }
                 let reason = agent.run_turn();
-                let response =
-                    json!({ "jsonrpc": "2.0", "id": id, "result": { "stopReason": reason } });
+                let mut result = json!({ "stopReason": reason });
+                if let Some(u) = agent.script.usage.clone() {
+                    let mut update = json!({ "sessionUpdate": "usage_update", "used": u.used.unwrap_or(0), "size": u.size.unwrap_or(0) });
+                    if let Some(c) = u.cost {
+                        update["cost"] = json!({ "amount": c, "currency": "USD" });
+                    }
+                    agent.update(update);
+                    let (i, o) = (u.input.unwrap_or(0), u.output.unwrap_or(0));
+                    result["usage"] = json!({ "inputTokens": i, "outputTokens": o, "cachedReadTokens": u.cached_read, "totalTokens": i + o });
+                }
+                let response = json!({ "jsonrpc": "2.0", "id": id, "result": result });
                 send(&response);
                 if agent.script.duplicate_response {
                     send(&response);

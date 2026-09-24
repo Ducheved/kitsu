@@ -17,6 +17,7 @@ pub mod recover;
 pub mod run;
 pub mod runner;
 pub mod scope;
+pub mod stats;
 pub mod status;
 pub mod store;
 pub mod util;

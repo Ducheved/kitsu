@@ -2,7 +2,7 @@
   import { app } from "../lib/app.svelte";
   import { api, errorText } from "../lib/api";
   import { i18n, t } from "../lib/i18n/index.svelte";
-  import { duration } from "../lib/status";
+  import { duration, usageText } from "../lib/status";
   import { render } from "../lib/md";
   import type { Evidence, Run, RunEvent } from "../lib/types";
 
@@ -116,7 +116,7 @@
   {#if error}<div class="err">{error}</div>{/if}
   {#if run}
     <div class="meta hint">
-      {t("act.started", { agent: run.agent, ago: i18n.ago(run.created_at) })}{#if run.ended_at}{t("act.took", { duration: duration(run.ended_at - run.created_at) })}{/if}{#if run.note}{t("act.note", { note: run.note })}{/if}
+      {t("act.started", { agent: run.agent, ago: i18n.ago(run.created_at) })}{#if run.ended_at}{t("act.took", { duration: duration(run.ended_at - run.created_at) })}{/if}{#if run.ended_at}{usageText(run.usage)}{/if}{#if run.note}{t("act.note", { note: run.note })}{/if}
     </div>
   {/if}
   <div class="rows scroll" bind:this={box}>

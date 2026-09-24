@@ -13,14 +13,14 @@
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
 use crate::run::{Outcome, RunEvent, RunState, reduce};
 use crate::util::now_ms;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -51,7 +51,9 @@ CREATE TABLE IF NOT EXISTS runs (
     -- Fixed once the snapshot exists: base..snapshot never changes, so
     -- status refreshes read these instead of asking git every time.
     snapshot_tree    TEXT,
-    changed          TEXT
+    changed          TEXT,
+    -- What the agent reported about tokens and cost (JSON), if anything.
+    usage            TEXT
 );
 CREATE INDEX IF NOT EXISTS runs_by_task ON runs(task, created_at);
 CREATE INDEX IF NOT EXISTS runs_live ON runs(state) WHERE state IN ('starting', 'running', 'stopping');
@@ -134,6 +136,79 @@ pub struct RunRow {
     pub snapshot_tree: Option<String>,
     /// Paths changed between `base` and `snapshot`.
     pub changed: Option<Vec<String>>,
+    /// Tokens and cost as the agent reported them. None when it reported
+    /// nothing, which is common: ACP makes this optional.
+    pub usage: Option<Usage>,
+}
+
+/// Token accounting for one run, in the agent's own numbers. Every field is
+/// optional because agents report different subsets; a missing field means
+/// "not reported", never zero.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Usage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_write: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    /// Tokens in the context window at the last report, and its size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_used: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+}
+
+impl Usage {
+    /// Fold in a `usage_update` session notification: context occupancy and
+    /// cumulative cost.
+    pub fn apply_update(&mut self, u: &Value) {
+        if let Some(n) = u["used"].as_u64() {
+            self.context_used = Some(n);
+        }
+        if let Some(n) = u["size"].as_u64() {
+            self.context_size = Some(n);
+        }
+        if let (Some(a), Some(c)) = (u["cost"]["amount"].as_f64(), u["cost"]["currency"].as_str()) {
+            self.cost = Some(a);
+            self.currency = Some(c.to_string());
+        }
+    }
+
+    /// Fold in the `usage` object of a `session/prompt` response (cumulative
+    /// token counts for the session).
+    pub fn apply_turn(&mut self, u: &Value) {
+        let get = |k: &str| u[k].as_u64();
+        self.input = get("inputTokens").or(self.input);
+        self.output = get("outputTokens").or(self.output);
+        self.cached_read = get("cachedReadTokens").or(self.cached_read);
+        self.cached_write = get("cachedWriteTokens").or(self.cached_write);
+        self.thought = get("thoughtTokens").or(self.thought);
+        self.total = get("totalTokens").or(self.total);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Usage::default()
+    }
+
+    /// Tokens the run spent, as far as the agent said: total if given,
+    /// otherwise input + output.
+    pub fn spent(&self) -> Option<u64> {
+        self.total.or(match (self.input, self.output) {
+            (None, None) => None,
+            (i, o) => Some(i.unwrap_or(0) + o.unwrap_or(0)),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -389,9 +464,20 @@ impl Store {
             )));
         }
         if version < SCHEMA_VERSION {
-            self.conn.execute_batch(SCHEMA)?;
-            self.conn
-                .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            // Two processes can open an old database at once; the write lock
+            // makes one of them migrate and the other see the result.
+            let tx = self.write_tx()?;
+            let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            if version == 0 {
+                tx.execute_batch(SCHEMA)?;
+            }
+            if version == 1 {
+                tx.execute_batch("ALTER TABLE runs ADD COLUMN usage TEXT;")?;
+            }
+            if version < SCHEMA_VERSION {
+                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            }
+            tx.commit()?;
         }
         Ok(())
     }
@@ -539,6 +625,15 @@ impl Store {
     pub fn set_run_pid(&self, id: &str, pid: Option<u32>) -> Result<()> {
         self.conn
             .execute("UPDATE runs SET pid = ?2 WHERE id = ?1", params![id, pid])?;
+        Ok(())
+    }
+
+    pub fn set_run_usage(&self, id: &str, usage: &Usage) -> Result<()> {
+        let json = serde_json::to_string(usage).unwrap_or_else(|_| "{}".into());
+        self.conn.execute(
+            "UPDATE runs SET usage = ?2 WHERE id = ?1",
+            params![id, json],
+        )?;
         Ok(())
     }
 
@@ -915,7 +1010,7 @@ fn append_event(conn: &Connection, run: Option<&str>, kind: &str, body: &Value) 
     Ok(conn.last_insert_rowid())
 }
 
-const RUN_COLS: &str = "id, task, agent, base, branch, worktree, state, stop_reason, detail, cancel_requested, owner, pid, brief, snapshot, resolution, from_run, note, created_at, ended_at, snapshot_tree, changed";
+const RUN_COLS: &str = "id, task, agent, base, branch, worktree, state, stop_reason, detail, cancel_requested, owner, pid, brief, snapshot, resolution, from_run, note, created_at, ended_at, snapshot_tree, changed, usage";
 
 fn run_row(r: &Row<'_>) -> rusqlite::Result<RunRow> {
     let state: String = r.get(6)?;
@@ -944,6 +1039,9 @@ fn run_row(r: &Row<'_>) -> rusqlite::Result<RunRow> {
         snapshot_tree: r.get(19)?,
         changed: r
             .get::<_, Option<String>>(20)?
+            .and_then(|c| serde_json::from_str(&c).ok()),
+        usage: r
+            .get::<_, Option<String>>(21)?
             .and_then(|c| serde_json::from_str(&c).ok()),
     })
 }
@@ -1014,6 +1112,89 @@ fn integration_row(r: &Row<'_>) -> rusqlite::Result<IntegrationRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A database written by schema v1 (before `usage`), with one run.
+    fn v1_database(dir: &Path) -> std::path::PathBuf {
+        let path = dir.join("state.db");
+        let v1 = SCHEMA.replace(
+            ",\n    -- What the agent reported about tokens and cost (JSON), if anything.\n    usage            TEXT",
+            "",
+        );
+        assert_ne!(v1, SCHEMA, "the v1 schema must not have the usage column");
+        let c = Connection::open(&path).expect("open");
+        c.execute_batch(&v1).expect("v1 schema");
+        c.pragma_update(None, "user_version", 1).expect("version");
+        c.execute(
+            "INSERT INTO runs (id, task, agent, base, branch, worktree, state, created_at) VALUES ('old', 't', 'test', 'b', 'kitsu/run/old', '/tmp/wt', 'finished', 1)",
+            [],
+        )
+        .expect("insert");
+        path
+    }
+
+    #[test]
+    fn v1_databases_upgrade_in_place_even_when_opened_concurrently() {
+        let dir = std::env::temp_dir().join(format!("kitsu-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = v1_database(&dir);
+        let opened: Vec<_> = (0..8)
+            .map(|_| {
+                let p = path.clone();
+                std::thread::spawn(move || Store::open(&p).map(|_| ()))
+            })
+            .collect();
+        for h in opened {
+            h.join()
+                .expect("thread")
+                .expect("every opener sees a usable database");
+        }
+        let s = Store::open(&path).expect("reopen");
+        let version: i64 = s
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .expect("v");
+        assert_eq!(version, SCHEMA_VERSION);
+        let old = s.run("old").expect("old run survives");
+        assert_eq!(old.usage, None);
+        let u = Usage {
+            input: Some(10),
+            output: Some(2),
+            ..Usage::default()
+        };
+        s.set_run_usage("old", &u).expect("usage");
+        assert_eq!(s.run("old").expect("run").usage, Some(u));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn usage_folds_updates_and_turn_totals() {
+        let mut u = Usage::default();
+        u.apply_update(&serde_json::json!({ "used": 5000, "size": 200000, "cost": { "amount": 0.02, "currency": "USD" } }));
+        u.apply_turn(&serde_json::json!({ "inputTokens": 1200, "outputTokens": 300, "cachedReadTokens": null, "totalTokens": 1500 }));
+        // A later update without cost keeps the cost we already know.
+        u.apply_update(&serde_json::json!({ "used": 6000, "size": 200000 }));
+        assert_eq!(u.context_used, Some(6000));
+        assert_eq!(u.cost, Some(0.02));
+        assert_eq!(u.cached_read, None, "null means not reported");
+        assert_eq!(u.spent(), Some(1500));
+        assert_eq!(
+            Usage {
+                input: Some(7),
+                ..Usage::default()
+            }
+            .spent(),
+            Some(7)
+        );
+        assert_eq!(
+            Usage {
+                context_used: Some(9),
+                ..Usage::default()
+            }
+            .spent(),
+            None
+        );
+    }
 
     fn store_with_run() -> Store {
         let s = Store::open_in_memory().expect("store");
