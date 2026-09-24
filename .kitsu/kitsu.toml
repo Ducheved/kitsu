@@ -48,3 +48,13 @@ scope = ["app/src-tauri/Cargo.toml", "app/src-tauri/capabilities/**"]
 
 [protect]
 paths = ["crates/kitsu/tests/**", "fixtures/**", "app/src-tauri/capabilities/**", "app/src-tauri/tauri.conf.json"]
+
+# Every Rust module belongs to exactly one component of the model in
+# .kitsu/architecture/. A new module without one fails `kitsu arch check`.
+[architecture]
+cover = ["crates/kitsu/src/*.rs", "crates/kitsu/src/bin/*.rs", "app/src-tauri/src/*.rs"]
+
+[checks.architecture]
+run = "cargo run -q -p kitsu --bin kitsu -- arch check"
+timeout = "10m"
+scope = ["crates/kitsu/src/**", "app/src-tauri/src/**", ".kitsu/architecture/**", ".kitsu/kitsu.toml", "docs/**"]

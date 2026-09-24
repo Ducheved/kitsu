@@ -909,3 +909,69 @@ fn agents_see_only_the_environment_they_are_allowed() {
     );
     assert!(said.contains("env PATH="), "{said}");
 }
+
+#[test]
+fn a_module_outside_the_architecture_model_fails_its_check() {
+    let env = Env::new("arch");
+    let model = env.repo.join(".kitsu/architecture");
+    std::fs::create_dir_all(&model).expect("model dir");
+    let files = [
+        ("shop.md", "+++\nlevel = \"system\"\n+++\n"),
+        (
+            "service.md",
+            "+++\nlevel = \"container\"\nparent = \"shop\"\npaths = [\"*.py\"]\n+++\n",
+        ),
+        (
+            "charges.md",
+            "+++\nlevel = \"component\"\nparent = \"service\"\npaths = [\"payments.py\", \"fake_upstream.py\", \"test_*.py\"]\n+++\n",
+        ),
+    ];
+    for (name, body) in files {
+        std::fs::write(model.join(name), body).expect("element");
+    }
+    let config = env.repo.join(".kitsu/kitsu.toml");
+    let mut toml = std::fs::read_to_string(&config).expect("config");
+    toml.push_str(&format!(
+        "\n[architecture]\ncover = [\"*.py\"]\n\n[checks.architecture]\nrun = \"{KITSU} arch check\"\ntimeout = \"1m\"\n"
+    ));
+    std::fs::write(&config, toml).expect("config");
+    // A check is required through a rule: this one covers every module.
+    std::fs::write(
+        env.repo.join(".kitsu/invariants/modules-have-a-component.md"),
+        "+++\ntitle = \"Every module belongs to one component\"\nscope = [\"*.py\", \".kitsu/architecture/**\"]\nchecks = [\"architecture\"]\n+++\n",
+    )
+    .expect("invariant");
+    git(&env.repo, &["add", "-A"]);
+    git(&env.repo, &["commit", "-qm", "model"]);
+    let here = env.ok(&["arch", "check"]);
+    assert!(here.contains("3 elements, 4 covered files"), "{here}");
+
+    let script = env.script(
+        "refunds",
+        "[[steps]]\nwrite = { path = \"refunds.py\", content = \"def refund(): pass\\n\" }\n",
+    );
+    assert!(env.run_with(&script, "rarch", &[]).status.success());
+    let status = env.ok(&["status"]);
+    assert!(status.contains("failing: architecture"), "{status}");
+    let o = env.out(&["accept", "rarch"]);
+    assert_eq!(
+        o.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&o.stdout)
+    );
+
+    // The same check on the same tree, by hand, says why.
+    let wt = env.repo.join(".git/kitsu/worktrees/rarch");
+    let o = Command::new(KITSU)
+        .args(["arch", "check"])
+        .current_dir(&wt)
+        .output()
+        .expect("arch");
+    let said = String::from_utf8_lossy(&o.stdout);
+    assert!(!o.status.success());
+    assert!(
+        said.contains("`refunds.py` belongs to no component"),
+        "{said}"
+    );
+}

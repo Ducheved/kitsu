@@ -27,15 +27,17 @@ pub enum Kind {
     Invariant,
     Question,
     Memory,
+    Architecture,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 5] = [
+    pub const ALL: [Kind; 6] = [
         Kind::Task,
         Kind::Decision,
         Kind::Invariant,
         Kind::Question,
         Kind::Memory,
+        Kind::Architecture,
     ];
 
     pub fn dir(self) -> &'static str {
@@ -45,6 +47,7 @@ impl Kind {
             Kind::Invariant => "invariants",
             Kind::Question => "questions",
             Kind::Memory => "memory",
+            Kind::Architecture => "architecture",
         }
     }
 
@@ -55,6 +58,7 @@ impl Kind {
             Kind::Invariant => "invariant",
             Kind::Question => "question",
             Kind::Memory => "memory",
+            Kind::Architecture => "element",
         }
     }
 
@@ -101,6 +105,66 @@ pub struct Config {
     /// Changes under these paths need explicit approval when a run is
     /// accepted. `.kitsu/**` is always included.
     pub protect: Scope,
+    /// Files that must each belong to exactly one architecture component
+    /// (`[architecture] cover`). Empty: coverage isn't checked.
+    pub architecture_cover: Scope,
+}
+
+/// C4 level of an architecture element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Level {
+    Person,
+    External,
+    System,
+    Container,
+    Component,
+}
+
+impl Level {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Level::Person => "person",
+            Level::External => "external",
+            Level::System => "system",
+            Level::Container => "container",
+            Level::Component => "component",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ElementState {
+    Active,
+    /// Described before it exists: its paths may not match anything yet.
+    Planned,
+    Retired,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Uses {
+    pub to: String,
+    pub why: Option<String>,
+}
+
+/// One element of the architecture model (`.kitsu/architecture/<id>.md`).
+/// The body is its documentation; level 4 (code) is never stored.
+#[derive(Debug, Clone)]
+pub struct Element {
+    pub id: String,
+    pub title: String,
+    pub level: Level,
+    pub parent: Option<String>,
+    pub technology: Option<String>,
+    /// The files this element claims (globs).
+    pub paths: Vec<String>,
+    pub uses: Vec<Uses>,
+    /// Prose outside `.kitsu/` that describes this element.
+    pub docs: Vec<String>,
+    pub state: ElementState,
+    pub body: String,
+    pub source: Source,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,6 +337,7 @@ pub struct Intent {
     pub invariants: BTreeMap<String, Invariant>,
     pub questions: BTreeMap<String, Question>,
     pub memory: BTreeMap<String, Memory>,
+    pub architecture: BTreeMap<String, Element>,
     pub problems: Vec<Problem>,
 }
 
@@ -445,6 +510,55 @@ impl Intent {
             Kind::Memory => {
                 let m = parse_memory(&id, front, body, source)?;
                 self.memory.insert(id, m);
+            }
+            Kind::Architecture => {
+                let f: ElementFront = toml::from_str(front).map_err(|e| toml_msg(&e))?;
+                let level = match f.level.as_str() {
+                    "person" => Level::Person,
+                    "external" => Level::External,
+                    "system" => Level::System,
+                    "container" => Level::Container,
+                    "component" => Level::Component,
+                    other => {
+                        return Err(format!(
+                            "unknown level `{other}` (person, external, system, container, component)"
+                        ));
+                    }
+                };
+                let state = match f.state.as_deref().unwrap_or("active") {
+                    "active" => ElementState::Active,
+                    "planned" => ElementState::Planned,
+                    "retired" => ElementState::Retired,
+                    other => {
+                        return Err(format!(
+                            "unknown element state `{other}` (active, planned, retired)"
+                        ));
+                    }
+                };
+                let uses = f
+                    .uses
+                    .into_iter()
+                    .map(|u| match u {
+                        UsesFront::Id(to) => Uses { to, why: None },
+                        UsesFront::Full { to, why } => Uses { to, why },
+                    })
+                    .collect();
+                self.architecture.insert(
+                    id.clone(),
+                    Element {
+                        title: f.title.unwrap_or_else(title_fallback),
+                        id,
+                        level,
+                        parent: f.parent.filter(|p| !p.is_empty()),
+                        technology: f.technology,
+                        paths: f.paths,
+                        uses,
+                        docs: f.docs,
+                        state,
+                        body: body.to_string(),
+                        source,
+                    },
+                );
             }
             Kind::Question => {
                 let f: QuestionFront = toml::from_str(front).map_err(|e| toml_msg(&e))?;
@@ -695,6 +809,7 @@ impl Intent {
             Kind::Invariant => self.invariants.keys().cloned().collect(),
             Kind::Question => self.questions.keys().cloned().collect(),
             Kind::Memory => self.memory.keys().cloned().collect(),
+            Kind::Architecture => self.architecture.keys().cloned().collect(),
         }
     }
 }
@@ -904,6 +1019,38 @@ struct ConfigFile {
     checks: BTreeMap<String, CheckFile>,
     #[serde(default)]
     protect: ProtectFile,
+    #[serde(default)]
+    architecture: ArchitectureFile,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ArchitectureFile {
+    #[serde(default)]
+    cover: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ElementFront {
+    title: Option<String>,
+    level: String,
+    parent: Option<String>,
+    technology: Option<String>,
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    uses: Vec<UsesFront>,
+    #[serde(default)]
+    docs: Vec<String>,
+    state: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum UsesFront {
+    Id(String),
+    Full { to: String, why: Option<String> },
 }
 
 #[derive(Deserialize)]
@@ -961,6 +1108,7 @@ fn parse_config(text: &str) -> Result<Config, String> {
     Ok(Config {
         checks,
         protect: Scope::new(file.protect.paths),
+        architecture_cover: Scope::new(file.architecture.cover),
     })
 }
 

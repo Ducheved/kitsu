@@ -49,7 +49,7 @@ enum Cmd {
     Next,
     /// Create a task, decision, invariant or question.
     New {
-        /// task | decision | invariant | question
+        /// task | decision | invariant | question | element
         kind: String,
         title: String,
         #[arg(long, value_delimiter = ',')]
@@ -175,6 +175,12 @@ enum Cmd {
         #[arg(long)]
         run: String,
     },
+    /// The architecture model (`.kitsu/architecture/`): elements, what they
+    /// claim, what they use. `kitsu arch check` compares it with the files.
+    Arch {
+        #[command(subcommand)]
+        cmd: Option<ArchCmd>,
+    },
     /// Search the code at a commit (default HEAD). Builds or refreshes the
     /// local index first; only files that changed are read.
     Search {
@@ -184,6 +190,14 @@ enum Cmd {
         #[arg(long, default_value = "HEAD")]
         rev: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ArchCmd {
+    /// Fail when the model and the working tree disagree: unknown
+    /// references, bad nesting, claimed paths that match nothing, covered
+    /// files with no component or several.
+    Check,
 }
 
 pub fn main() -> std::process::ExitCode {
@@ -223,6 +237,11 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
     let ok = std::process::ExitCode::SUCCESS;
     if let Cmd::Agents = cli.cmd {
         return agents_cmd(cli.json).map(|_| ok);
+    }
+    // Reads the working tree only, so it runs the same in a run's snapshot
+    // (where checks run) as in a checkout, with or without a workspace.
+    if let Cmd::Arch { cmd } = &cli.cmd {
+        return arch_cmd(&cwd, cmd.is_some(), cli.json);
     }
     let ws = Workspace::discover(&cwd)?;
     let json = cli.json;
@@ -333,7 +352,7 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
             }
             Ok(())
         }
-        Cmd::Agents => unreachable!("handled above"),
+        Cmd::Agents | Cmd::Arch { .. } => unreachable!("handled above"),
     }
     .map(|_| ok)
 }
@@ -515,6 +534,10 @@ pub fn render_new(
             list(scope)
         )),
         Kind::Question => front.push_str(&format!("blocks = {}\n", list(blocks))),
+        Kind::Architecture => front.push_str(&format!(
+            "level = \"component\"\nparent = \"\"\npaths = {}\nuses = []\n",
+            list(scope)
+        )),
         Kind::Memory => front.push_str(&format!(
             "kind = \"fact\"\nscope = {}\nanchors = {}\n",
             list(scope),
@@ -527,6 +550,7 @@ pub fn render_new(
         Kind::Decision => "Context, the choice, and what it costs.\n",
         Kind::Question => "What we need to know and what depends on it.\n",
         Kind::Memory => "What the next person or agent should know, and how you know it.\n",
+        Kind::Architecture => "What this is for, what it must never do, and where its seams are.\n",
     };
     format!("+++\n{front}+++\n{body}")
 }
@@ -1391,6 +1415,82 @@ fn memory_cmd(ws: &Workspace, json: bool) -> Result<()> {
         println!("{} {p}: {d}", paint("problem:", RED));
     }
     Ok(())
+}
+
+fn arch_cmd(cwd: &Path, check: bool, json: bool) -> Result<std::process::ExitCode> {
+    let git = crate::git::Git::new(cwd);
+    let root = PathBuf::from(git.run(["rev-parse", "--show-toplevel"])?.trim());
+    let intent = Intent::load_dir(&root)?;
+    let listed =
+        crate::git::Git::new(&root).run(["ls-files", "-z", "-c", "-o", "--exclude-standard"])?;
+    let mut files: Vec<String> = listed
+        .split('\0')
+        .filter(|f| !f.is_empty() && root.join(f).is_file())
+        .map(str::to_string)
+        .collect();
+    files.sort();
+    files.dedup();
+    let report = crate::arch::check(&intent, &files);
+    let code = if report.ok() {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
+    };
+    if json {
+        println!("{}", serde_json::to_string(&report).unwrap_or_default());
+        return Ok(code);
+    }
+    if !check {
+        print_arch_tree(&intent);
+    }
+    for e in &report.errors {
+        println!("{} {e}", paint("✗", RED));
+    }
+    for w in &report.warnings {
+        println!("{} {w}", paint("!", YELLOW));
+    }
+    if report.ok() {
+        println!(
+            "{} {} elements, {} covered files each in one component",
+            paint("✓", GREEN),
+            report.elements,
+            report.covered_files
+        );
+    }
+    Ok(code)
+}
+
+fn print_arch_tree(intent: &Intent) {
+    use crate::intent::{Element, ElementState};
+    let els = &intent.architecture;
+    fn show(els: &std::collections::BTreeMap<String, Element>, e: &Element, depth: usize) {
+        let state = match e.state {
+            ElementState::Active => String::new(),
+            ElementState::Planned => paint(" (planned)", DIM),
+            ElementState::Retired => paint(" (retired)", DIM),
+        };
+        let uses = if e.uses.is_empty() {
+            String::new()
+        } else {
+            let to: Vec<&str> = e.uses.iter().map(|u| u.to.as_str()).collect();
+            paint(&format!("  → {}", to.join(", ")), DIM)
+        };
+        println!(
+            "{}{} {}{state}{uses}",
+            "  ".repeat(depth),
+            paint(e.level.as_str(), DIM),
+            e.id
+        );
+        for c in els
+            .values()
+            .filter(|c| c.parent.as_deref() == Some(e.id.as_str()))
+        {
+            show(els, c, depth + 1);
+        }
+    }
+    for e in els.values().filter(|e| e.parent.is_none()) {
+        show(els, e, 0);
+    }
 }
 
 fn stats_cmd(ws: &Workspace, json: bool) -> Result<()> {

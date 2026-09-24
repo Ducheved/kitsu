@@ -5,6 +5,7 @@
 
 pub mod acp;
 pub mod agents;
+pub mod arch;
 pub mod brief;
 pub mod check;
 pub mod cli;
