@@ -11,11 +11,17 @@ out by construction; measured on openai/codex (8.6k files) at 5.6 s cold,
   Needs lazy listing by directory past ~20k files.
 - One index per repository. A workspace of several repositories needs one
   query over all of them.
-- Agents run their own ripgrep. Kitsu can start agent processes with lower
-  CPU and I/O priority (nice/ionice, a cgroup CPU quota where available)
-  and a `RIPGREP_CONFIG_PATH` with a thread cap and ignores; whether an
-  agent's bundled ripgrep honours it is unknown.
 
-Gate: on a synthetic 1M-line workspace, peak agent search CPU ≤ 2 cores
-and no UI frame over 50 ms while it runs, versus the unthrottled baseline.
-Keep each piece only if it moves its number.
+Done: agents' CPU. Agents run their own ripgrep, and Claude Code's
+native build runs it with `--no-config`, so a `RIPGREP_CONFIG_PATH` thread
+cap never reaches it. Kitsu now starts every agent under `nice` and, on
+Linux, `taskset` (all CPUs but one by default; `[limits]` in agents.toml);
+children inherit both, and ripgrep sizes its thread pool from the CPUs it
+may use. `fixtures/cpu-limits/bench.py`, 4 cores, three agents' bursts over
+1M lines: foreground frame p99 24-28 ms unlimited, 9-14 ms at nice 10
+(same wall time), 6-9 ms with one core left out (+10% wall time).
+Not measured: `ionice` (the tree was in page cache, so it moved nothing
+and isn't applied), macOS (nice only), Windows (nothing yet).
+
+Gate for the rest: on a synthetic 1M-line workspace, no UI frame over
+50 ms, versus today. Keep each piece only if it moves its number.

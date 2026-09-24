@@ -1649,6 +1649,21 @@ fn agents_cmd(json: bool) -> Result<()> {
                 );
             }
         }
+        let (_, applied) = agents::limited(
+            &[],
+            agents::limits()?,
+            &agents::allowed_cpus(),
+            agents::on_path,
+        );
+        if !applied.is_empty() {
+            println!(
+                "\n{}",
+                paint(
+                    &format!("every agent runs with: {}", applied.join(", ")),
+                    DIM
+                )
+            );
+        }
     }
     Ok(())
 }

@@ -13,6 +13,11 @@
 //! # Sent as `_meta` on session/new. Leave it out to keep the preset's;
 //! # `meta = {}` sends none.
 //! meta = { systemPrompt = { excludeDynamicSections = true } }
+//!
+//! # For every agent and everything it starts (searches, builds, tests).
+//! [limits]
+//! nice = 10   # 0 to turn off
+//! cpus = 2    # 0: no cap; unset: all but one when there are 3 or more
 //! ```
 
 use std::collections::BTreeMap;
@@ -182,6 +187,148 @@ const PRESETS: &[(&str, &[&str])] = &[
 struct File {
     #[serde(default)]
     agents: BTreeMap<String, Entry>,
+    #[serde(default)]
+    limits: LimitsFront,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct LimitsFront {
+    nice: Option<u8>,
+    cpus: Option<usize>,
+}
+
+/// How hard an agent, and everything it starts, may lean on the machine.
+///
+/// Agents run their own ripgrep, builds and tests, and several runs can be
+/// going at once. Measured with three agents' worth of ripgrep bursts over
+/// a 1M-line tree on 4 cores: unlimited, a 5 ms foreground frame finished
+/// up to 24-28 ms late at p99; at nice 10, 9-14 ms with the same
+/// throughput; at nice 10 with one core left out, 6-9 ms for 10% more wall
+/// time. Agents' own ripgrep config can't do this: Claude Code's native
+/// build runs its ripgrep with `--no-config`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Added to Kitsu's own niceness (0-19). The agent still gets idle
+    /// CPU; it yields when something else needs it.
+    pub nice: u8,
+    /// How many CPUs the agent may run on. `None`: all but one when there
+    /// are at least three. `Some(0)`: all of them.
+    pub cpus: Option<usize>,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            nice: 10,
+            cpus: None,
+        }
+    }
+}
+
+/// `[limits]` from agents.toml, or the defaults.
+pub fn limits() -> Result<Limits> {
+    let path = config_dir().join("agents.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_limits(&path, &text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Limits::default()),
+        Err(e) => Err(Error::io(path.display().to_string(), e)),
+    }
+}
+
+fn parse_limits(path: &std::path::Path, text: &str) -> Result<Limits> {
+    let bad = |detail: String| Error::Parse {
+        path: path.to_path_buf(),
+        detail,
+    };
+    let file: File = toml::from_str(text).map_err(|e| bad(e.message().to_string()))?;
+    let d = Limits::default();
+    let nice = file.limits.nice.unwrap_or(d.nice);
+    if nice > 19 {
+        return Err(bad(format!("limits.nice is {nice}; it goes from 0 to 19")));
+    }
+    Ok(Limits {
+        nice,
+        cpus: file.limits.cpus,
+    })
+}
+
+/// The command line that starts `command` under `limits`, and a line for
+/// each limit saying what was applied or why it wasn't.
+///
+/// Wrappers that exec (`nice`, `taskset`), so the agent keeps the pid and
+/// process group Kitsu started, and every child inherits the limits.
+/// `allowed` are the CPUs Kitsu itself may run on; `have` says whether a
+/// program is on the PATH.
+pub fn limited(
+    command: &[String],
+    limits: Limits,
+    allowed: &[usize],
+    have: impl Fn(&str) -> bool,
+) -> (Vec<String>, Vec<String>) {
+    let mut prefix: Vec<String> = Vec::new();
+    let mut applied = Vec::new();
+    if limits.nice > 0 {
+        if cfg!(unix) && have("nice") {
+            prefix.extend(["nice".into(), "-n".into(), limits.nice.to_string()]);
+            applied.push(format!("nice {}", limits.nice));
+        } else {
+            applied.push("nice: not applied (no `nice` here)".into());
+        }
+    }
+    let n = allowed.len();
+    let want = match limits.cpus {
+        Some(0) => n,
+        Some(k) => k.min(n),
+        None if n >= 3 => n - 1,
+        None => n,
+    };
+    if want < n {
+        if cfg!(target_os = "linux") && have("taskset") {
+            let list: Vec<String> = allowed[..want].iter().map(|c| c.to_string()).collect();
+            prefix.extend(["taskset".into(), "-c".into(), list.join(",")]);
+            applied.push(format!("cpus {want} of {n}"));
+        } else {
+            applied.push(format!(
+                "cpus: not capped to {want} of {n} (no `taskset` here)"
+            ));
+        }
+    }
+    prefix.extend(command.iter().cloned());
+    (prefix, applied)
+}
+
+/// The CPUs this process may run on: Linux's `Cpus_allowed_list`, else
+/// `0..available_parallelism`.
+pub fn allowed_cpus() -> Vec<usize> {
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status")
+        && let Some(list) = status
+            .lines()
+            .find_map(|l| l.strip_prefix("Cpus_allowed_list:"))
+        && let Some(cpus) = parse_cpu_list(list.trim())
+    {
+        return cpus;
+    }
+    let n = std::thread::available_parallelism().map_or(1, |n| n.get());
+    (0..n).collect()
+}
+
+/// `0-3,8,10-11` → [0, 1, 2, 3, 8, 10, 11]. `None` if it doesn't parse.
+fn parse_cpu_list(s: &str) -> Option<Vec<usize>> {
+    let mut out = Vec::new();
+    for part in s.split(',').filter(|p| !p.is_empty()) {
+        match part.split_once('-') {
+            Some((a, b)) => out.extend(a.parse::<usize>().ok()?..=b.parse::<usize>().ok()?),
+            None => out.push(part.parse().ok()?),
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Whether `program` is an executable file on the PATH.
+pub fn on_path(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
 }
 
 #[derive(Deserialize)]
@@ -384,5 +531,94 @@ mod tests {
         let custom =
             with_config("[agents.mine]\ncommand = [\"x\"]\nmeta = { mode = \"fast\", n = 2 }\n");
         assert_eq!(custom["mine"].meta, Some(json!({ "mode": "fast", "n": 2 })));
+    }
+
+    fn argv(s: &[&str]) -> Vec<String> {
+        s.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn limits_wrap_the_command_with_programs_that_exec() {
+        let cmd = argv(&["claude-agent-acp", "--x"]);
+        let all = |_: &str| true;
+        let (line, applied) = limited(&cmd, Limits::default(), &[0, 1, 2, 3], all);
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                line,
+                argv(&[
+                    "nice",
+                    "-n",
+                    "10",
+                    "taskset",
+                    "-c",
+                    "0,1,2",
+                    "claude-agent-acp",
+                    "--x"
+                ])
+            );
+            assert_eq!(applied, ["nice 10", "cpus 3 of 4"]);
+        }
+        // The CPUs are the ones this process may use, not 0..n.
+        let (line, _) = limited(
+            &cmd,
+            Limits {
+                nice: 0,
+                cpus: Some(2),
+            },
+            &[4, 5, 6, 7],
+            all,
+        );
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                line,
+                argv(&["taskset", "-c", "4,5", "claude-agent-acp", "--x"])
+            );
+        }
+        // Two CPUs: nothing to leave out by default; `cpus = 0` never caps.
+        let off = Limits {
+            nice: 0,
+            cpus: None,
+        };
+        assert_eq!(limited(&cmd, off, &[0, 1], all).0, cmd);
+        let off = Limits {
+            nice: 0,
+            cpus: Some(0),
+        };
+        assert_eq!(limited(&cmd, off, &[0, 1, 2, 3], all).0, cmd);
+    }
+
+    #[test]
+    fn a_missing_wrapper_is_reported_not_skipped_silently() {
+        let cmd = argv(&["agent"]);
+        let (line, applied) = limited(&cmd, Limits::default(), &[0, 1, 2, 3], |_| false);
+        assert_eq!(line, cmd);
+        assert_eq!(
+            applied,
+            [
+                "nice: not applied (no `nice` here)",
+                "cpus: not capped to 3 of 4 (no `taskset` here)"
+            ]
+        );
+    }
+
+    #[test]
+    fn cpu_lists_and_limit_config_parse() {
+        assert_eq!(
+            parse_cpu_list("0-3,8,10-11"),
+            Some(vec![0, 1, 2, 3, 8, 10, 11])
+        );
+        assert_eq!(parse_cpu_list("5"), Some(vec![5]));
+        assert_eq!(parse_cpu_list("x"), None);
+        let p = std::path::Path::new("agents.toml");
+        assert_eq!(parse_limits(p, "").expect("empty"), Limits::default());
+        assert_eq!(
+            parse_limits(p, "[limits]\nnice = 0\ncpus = 2\n").expect("set"),
+            Limits {
+                nice: 0,
+                cpus: Some(2)
+            }
+        );
+        assert!(parse_limits(p, "[limits]\nnice = 25\n").is_err());
+        assert!(parse_limits(p, "[limits]\nthreads = 2\n").is_err());
     }
 }

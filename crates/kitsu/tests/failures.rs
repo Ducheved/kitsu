@@ -975,3 +975,70 @@ fn a_module_outside_the_architecture_model_fails_its_check() {
         "{said}"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn agents_and_their_children_run_niced_on_fewer_cpus() {
+    let env = Env::new("limits");
+    let field = |status: &str, key: &str| -> String {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(key))
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let me = std::fs::read_to_string("/proc/self/status").expect("status");
+    let first_cpu: String = field(&me, "Cpus_allowed_list:")
+        .split([',', '-'])
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let my_nice: i64 = std::fs::read_to_string("/proc/self/stat")
+        .expect("stat")
+        .rsplit(')')
+        .next()
+        .and_then(|rest| rest.split_whitespace().nth(16).map(str::to_string))
+        .and_then(|n| n.parse().ok())
+        .expect("nice");
+    std::fs::write(
+        env.cfg.join("agents.toml"),
+        "[limits]\nnice = 7\ncpus = 1\n",
+    )
+    .expect("limits");
+    // What the agent's own child sees is what its ripgrep would get.
+    let script = env.script(
+        "sched",
+        "[[steps]]\nshell = \"cat /proc/self/status > sched.status; cat /proc/self/stat > sched.stat\"\n",
+    );
+    let o = env.run_with(&script, "rlim", &["--no-verify"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let wt = env.repo.join(".git/kitsu/worktrees/rlim");
+    let status = std::fs::read_to_string(wt.join("sched.status")).expect("child status");
+    let stat = std::fs::read_to_string(wt.join("sched.stat")).expect("child stat");
+    let nice: i64 = stat
+        .rsplit(')')
+        .next()
+        .and_then(|rest| rest.split_whitespace().nth(16).map(str::to_string))
+        .and_then(|n| n.parse().ok())
+        .expect("child nice");
+    assert_eq!(
+        nice,
+        (my_nice + 7).min(19),
+        "nice is relative to Kitsu's own"
+    );
+    // On a one-CPU machine there's nothing to cap.
+    if field(&me, "Cpus_allowed_list:") != first_cpu {
+        assert_eq!(field(&status, "Cpus_allowed_list:"), first_cpu, "{status}");
+    }
+    let limits: Vec<String> = env
+        .store()
+        .run_events("rlim", 0, 1000)
+        .expect("events")
+        .into_iter()
+        .filter(|e| e.kind == "run.limits")
+        .map(|e| e.body["applied"].to_string())
+        .collect();
+    assert_eq!(limits.len(), 1, "{limits:?}");
+    assert!(limits[0].contains("nice 7"), "{limits:?}");
+}

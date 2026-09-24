@@ -233,9 +233,22 @@ pub async fn drive(
     let log = std::fs::File::create(&log_path)
         .map_err(|e| Error::io(log_path.display().to_string(), e))?;
 
-    let (program, args) = opts
-        .agent
-        .command
+    let limits = match crate::agents::limits() {
+        Ok(l) => l,
+        Err(e) => {
+            let detail = format!("agent limits: {e}");
+            store.apply_run_event(id, &RunEvent::StartFailed(detail.clone()))?;
+            return Err(Error::Invalid(detail));
+        }
+    };
+    let (argv, applied) = crate::agents::limited(
+        &opts.agent.command,
+        limits,
+        &crate::agents::allowed_cpus(),
+        crate::agents::on_path,
+    );
+    store.append(Some(id), "run.limits", &json!({ "applied": applied }))?;
+    let (program, args) = argv
         .split_first()
         .ok_or_else(|| Error::Invalid("empty agent command".into()))?;
     let mut cmd = Command::new(program);
