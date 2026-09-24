@@ -93,6 +93,28 @@
       <p class="hint">{t("rules.noDecisions")}</p>
     {/each}
 
+    <div class="section-title">{t("rules.memory")}</div>
+    {#each rules.memory as m (m.id)}
+      <div class="item">
+        <div class="item-head">
+          <span class="item-title">{m.title}</span>
+          <span class="pill dim">{t(`memkind.${m.kind}`)}</span>
+          {#if m.freshness?.status === "stale"}
+            <span class="pill warn" title={t("rules.memoryStaleHint", { files: m.freshness.changed.join(", ") })}>{t("rules.memoryStale")}</span>
+          {:else if m.freshness?.status === "uncommitted"}
+            <span class="pill dim">{t("rules.memoryUncommitted")}</span>
+          {/if}
+        </div>
+        {#if m.freshness?.status === "stale"}<div class="hint tone-warn">{t("rules.memoryStaleHint", { files: m.freshness.changed.join(", ") })}</div>{/if}
+        {#if m.body.trim()}<div class="prose small">{@html render(m.body)}</div>{/if}
+        <div class="hint mono">
+          {#if m.personal}{t("rules.memoryPersonal")}{:else}{m.scope.length ? m.scope.join(", ") : t("rules.wholeRepo")}{#if m.anchors.length}{" · "}{t("rules.memoryAnchors", { files: m.anchors.join(", ") })}{/if}{/if}{m.by ? ` · ${m.by}` : ""}{m.run ? ` · ${m.run}` : ""}
+        </div>
+      </div>
+    {:else}
+      <p class="hint">{t("rules.memoryEmpty")}</p>
+    {/each}
+
     {#if rules.questions.length}
       <div class="section-title">{t("rules.questions")}</div>
       {#each rules.questions as q (q.id)}

@@ -207,7 +207,30 @@ export interface Rules {
   invariants: { id: string; title: string; active: boolean; scope: string[]; checks: { name: string; status: CheckStatus }[]; decision: string | null; body: string; path: string }[];
   decisions: { id: string; title: string; state: string; scope: string[]; rejected: string[]; body: string; path: string }[];
   questions: { id: string; title: string; open: boolean; blocks: string[]; answer: string | null; body: string; path: string }[];
+  memory: MemoryNote[];
   checks: { name: string; run: string; scope: string[]; status: CheckStatus }[];
+}
+
+export type MemoryKind = "fact" | "gotcha" | "convention" | "preference" | "lesson";
+
+export type Freshness =
+  | { status: "current" }
+  | { status: "stale"; changed: string[]; since: string }
+  | { status: "unanchored" }
+  | { status: "uncommitted" };
+
+export interface MemoryNote {
+  id: string;
+  title: string;
+  kind: MemoryKind;
+  scope: string[];
+  anchors: string[];
+  by: string | null;
+  run: string | null;
+  body: string;
+  path: string;
+  freshness: Freshness | null;
+  personal: boolean;
 }
 
 export interface FileText {

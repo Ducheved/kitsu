@@ -242,7 +242,7 @@ const handlers: Record<string, (a: Record<string, unknown>) => unknown> = {
       { name: "test", command: "kitsu-test-agent", source: "bundled" },
     ],
     problems: [],
-    counts: { invariants: 2, decisions: 1, open_questions: questions.filter((q) => q.open).length, checks: 3 },
+    counts: { invariants: 2, decisions: 1, memory: 3, open_questions: questions.filter((q) => q.open).length, checks: 3 },
   }),
   mark_seen: (a) => {
     seen = a.seq as number;
@@ -377,6 +377,11 @@ const handlers: Record<string, (a: Record<string, unknown>) => unknown> = {
       { id: "retry-budget", title: "Retry charges at most 3 times, only with an idempotency key", state: "accepted", scope: ["payments.py"], rejected: ["Infinite retry: turns an upstream brownout into our outage", "Circuit breaker for now: one caller, no evidence of long outages", "Retrying without a key: a lost response becomes a second charge"], body: "Three attempts total, with jittered backoff between them.", path: ".kitsu/decisions/retry-budget.md" },
     ],
     questions: questions.map((q) => ({ ...q, path: `.kitsu/questions/${q.id}.md` })),
+    memory: [
+      { id: "upstream-dedupes", title: "The upstream dedupes idempotency keys for 24 hours", kind: "fact", scope: ["payments.py"], anchors: ["payments.py"], by: "you", run: null, body: "From their API docs, section Idempotency. A retry after 24h is a new charge.", path: ".kitsu/memory/upstream-dedupes.md", freshness: { status: "current" }, personal: false },
+      { id: "fake-upstream-sleeps", title: "fake_upstream sleeps for real unless you pass sleep=", kind: "gotcha", scope: ["test_*.py"], anchors: ["fake_upstream.py"], by: "claude", run: "r7k2mq", body: "Tests take 20s instead of 0.2s if you forget it.", path: ".kitsu/memory/fake-upstream-sleeps.md", freshness: { status: "stale", changed: ["fake_upstream.py"], since: "71dce3e" }, personal: false },
+      { id: "personal/small-commits", title: "Small commits, one idea each", kind: "preference", scope: [], anchors: [], by: null, run: null, body: "", path: "~/.config/kitsu/memory/small-commits.md", freshness: { status: "unanchored" }, personal: true },
+    ],
     checks: [
       { name: "retries", run: "python3 -m unittest -q test_retries", scope: [], status: { status: "stale", outcome: "fail", evidence: 1, changed: ["payments.py"], more: 0 } },
       { name: "idempotency", run: "python3 -m unittest -q test_idempotency", scope: ["payments.py"], status: { status: "stale", outcome: "fail", evidence: 2, changed: ["payments.py"], more: 0 } },

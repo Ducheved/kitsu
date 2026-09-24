@@ -17,7 +17,10 @@ use serde::Serialize;
 
 use crate::check::status_at;
 use crate::git::Git;
-use crate::intent::{DecisionState, Intent, InvariantState, QuestionState, Task};
+use crate::intent::{
+    DecisionState, Intent, InvariantState, Memory, MemoryKind, QuestionState, Task,
+};
+use crate::memory::{self, Freshness, Personal};
 use crate::run::RunState;
 use crate::stats::estimate_tokens;
 use crate::status::required_checks;
@@ -66,6 +69,8 @@ pub struct Context<'a> {
     pub base: Option<&'a str>,
     pub worktree: Option<&'a str>,
     pub run: Option<&'a RunRow>,
+    /// The person's own notes (preferences), from their config dir.
+    pub personal: &'a Personal,
     pub budget: usize,
 }
 
@@ -140,6 +145,12 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
         .problems
         .iter()
         .map(|p| format!("{}: {}", p.path, p.detail))
+        .chain(
+            cx.personal
+                .problems
+                .iter()
+                .map(|(p, d)| format!("{p}: {d}")),
+        )
         .collect();
     if !problems.is_empty() {
         let _ = writeln!(out, "\n## Warning: some rule files could not be read");
@@ -282,6 +293,77 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
         });
     }
 
+    // Notes: gotchas and conventions first, stale ones after current ones.
+    let fresh = match (cx.git, cx.base) {
+        (Some(g), Some(b)) => memory::freshness(g, b, intent.memory.values()).ok(),
+        _ => None,
+    };
+    let mut notes: Vec<(&Memory, Option<&Freshness>, String)> = intent
+        .memory
+        .values()
+        .filter_map(|m| {
+            let why = if m.scope.is_everything() {
+                "applies to the whole repository".to_string()
+            } else if m.scope.may_overlap(&task.scope) {
+                scope_reason(&task.scope, &m.scope)
+            } else {
+                return None;
+            };
+            Some((m, fresh.as_ref().and_then(|f| f.get(&m.id)), why))
+        })
+        .chain(
+            cx.personal
+                .notes
+                .iter()
+                .map(|m| (m, None, "your human's preference".to_string())),
+        )
+        .collect();
+    let rank = |k: MemoryKind| match k {
+        MemoryKind::Gotcha => 0,
+        MemoryKind::Convention => 1,
+        MemoryKind::Preference => 2,
+        MemoryKind::Fact => 3,
+        MemoryKind::Lesson => 4,
+    };
+    notes.sort_by_key(|(m, f, _)| {
+        (
+            matches!(f, Some(Freshness::Stale { .. })),
+            rank(m.kind),
+            m.id.clone(),
+        )
+    });
+    for (m, f, why) in notes {
+        let mut body = String::new();
+        let _ = writeln!(body, "- **{}** ({}, `{}`)", m.title, m.kind.as_str(), m.id);
+        if let Some(Freshness::Stale { changed, since }) = f {
+            let _ = writeln!(
+                body,
+                "  May be out of date: {} changed after it was written ({}). Check before relying on it.",
+                changed.join(", "),
+                short(since)
+            );
+        }
+        for line in excerpt(&m.body, 8).lines() {
+            let _ = writeln!(body, "  {line}");
+        }
+        let reacquire = format!("read {}", m.source.path);
+        optional.push(Section {
+            title: "What earlier work learned".into(),
+            body,
+            included: vec![Included {
+                kind: "memory",
+                id: m.id.clone(),
+                title: m.title.clone(),
+                path: m.source.path.clone(),
+                content_id: m.source.content_id.clone(),
+                why,
+            }],
+            kind: "memory",
+            id: m.id.clone(),
+            reacquire,
+        });
+    }
+
     if let (Some(store), Some(git)) = (cx.store, cx.git) {
         let current = cx.run.map(|r| r.id.as_str());
         let attempts: Vec<RunRow> = store
@@ -361,6 +443,10 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
     let _ = writeln!(
         out,
         "- If you make a design decision, write or update `.kitsu/decisions/<short-name>.md` with `state = \"proposed\"`. It is reviewed separately from your code."
+    );
+    let _ = writeln!(
+        out,
+        "- If you learn something the next agent would otherwise rediscover, write `.kitsu/memory/<short-name>.md` (front matter: `title`, `kind` = fact, gotcha, convention or lesson, `scope`, and `anchors` = the files it describes, so it's flagged when they change)."
     );
     let _ = writeln!(
         out,
@@ -521,9 +607,15 @@ mod tests {
             base: None,
             worktree: None,
             run: None,
+            personal: &NO_PERSONAL,
             budget,
         }
     }
+
+    static NO_PERSONAL: Personal = Personal {
+        notes: Vec::new(),
+        problems: Vec::new(),
+    };
 
     #[test]
     fn includes_what_constrains_the_task_and_says_why() {
@@ -571,6 +663,90 @@ mod tests {
             b.omitted
         );
         assert!(b.markdown.contains("Left out of this brief"));
+    }
+
+    #[test]
+    fn memory_in_scope_is_included_gotchas_first_and_personal_notes_ride_along() {
+        let mut files = vec![
+            (
+                ".kitsu/tasks/t.md",
+                "+++\nscope = [\"src/client/**\"]\n+++\n",
+            ),
+            (
+                ".kitsu/memory/fact.md",
+                "+++\ntitle = \"Upstream dedupes for 24h\"\nkind = \"fact\"\nscope = [\"src/client/**\"]\n+++\n",
+            ),
+            (
+                ".kitsu/memory/trap.md",
+                "+++\ntitle = \"Tests pass offline only because of a stub\"\nkind = \"gotcha\"\nscope = [\"src/**\"]\n+++\n",
+            ),
+            (
+                ".kitsu/memory/ui.md",
+                "+++\ntitle = \"The UI polls\"\nkind = \"fact\"\nscope = [\"app/**\"]\n+++\n",
+            ),
+        ];
+        files.sort();
+        let i = intent(&files);
+        let personal = Personal {
+            notes: vec![
+                crate::intent::parse_memory(
+                    "personal/small",
+                    "kind = \"preference\"\ntitle = \"Small commits\"",
+                    "",
+                    crate::intent::Source {
+                        path: "~/.config/kitsu/memory/small.md".into(),
+                        content_id: "x".into(),
+                    },
+                )
+                .expect("note"),
+            ],
+            problems: vec![("~/.config/kitsu/memory/bad.md".into(), "nope".into())],
+        };
+        let mut c = cx(&i, DEFAULT_BUDGET);
+        c.personal = &personal;
+        let b = compile(&c, &i.tasks["t"]);
+        let md = &b.markdown;
+        let trap = md.find("Tests pass offline").expect("gotcha included");
+        let fact = md.find("Upstream dedupes").expect("fact included");
+        assert!(trap < fact, "gotchas before facts:\n{md}");
+        assert!(!md.contains("The UI polls"), "out-of-scope note leaked in");
+        assert!(md.contains("Small commits"));
+        assert!(
+            md.contains("bad.md: nope"),
+            "a broken personal note is reported, not dropped"
+        );
+        let why = &b
+            .included
+            .iter()
+            .find(|x| x.id == "personal/small")
+            .expect("personal")
+            .why;
+        assert_eq!(why, "your human's preference");
+    }
+
+    #[test]
+    fn stale_notes_say_what_changed() {
+        use crate::git::testing::TempRepo;
+        let repo = TempRepo::new(&[
+            ("src/client.rs", "fn call() {}\n"),
+            (".kitsu/tasks/t.md", "+++\nscope = [\"src/**\"]\n+++\n"),
+            (
+                ".kitsu/memory/call.md",
+                "+++\ntitle = \"call() never retries\"\nkind = \"fact\"\nscope = [\"src/**\"]\nanchors = [\"src/client.rs\"]\n+++\n",
+            ),
+        ]);
+        repo.write("src/client.rs", "fn call() { retry() }\n");
+        let head = repo.commit_all("retry");
+        let git = repo.git();
+        let i = Intent::from_files(git.files_at(&head, crate::intent::DIR).expect("files"));
+        let mut c = cx(&i, DEFAULT_BUDGET);
+        c.git = Some(&git);
+        c.base = Some(&head);
+        let md = compile(&c, &i.tasks["t"]).markdown;
+        assert!(
+            md.contains("May be out of date: src/client.rs changed after it was written"),
+            "{md}"
+        );
     }
 
     #[test]

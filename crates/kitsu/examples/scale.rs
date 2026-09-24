@@ -160,6 +160,7 @@ fn state(n: usize) {
             base: Some(&head),
             worktree: None,
             run: None,
+            personal: &kitsu::memory::Personal::default(),
             budget: brief::DEFAULT_BUDGET,
         },
         task,

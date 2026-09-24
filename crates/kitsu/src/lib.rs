@@ -13,6 +13,7 @@ pub mod error;
 pub mod git;
 pub mod integrate;
 pub mod intent;
+pub mod memory;
 pub mod recover;
 pub mod run;
 pub mod runner;

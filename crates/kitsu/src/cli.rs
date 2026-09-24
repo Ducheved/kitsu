@@ -146,6 +146,29 @@ enum Cmd {
     Agents,
     /// Where the tokens went: per agent, per outcome, per task.
     Stats,
+    /// Write down something the next person or agent should know.
+    Remember {
+        title: String,
+        /// fact | gotcha | convention | preference | lesson
+        #[arg(long, default_value = "fact")]
+        kind: String,
+        /// Where it applies (briefs for tasks here include it).
+        #[arg(long, value_delimiter = ',')]
+        scope: Vec<String>,
+        /// Files it describes; the note is flagged when they change.
+        /// Defaults to the scope.
+        #[arg(long, value_delimiter = ',')]
+        anchor: Vec<String>,
+        /// The note itself.
+        #[arg(long, default_value = "")]
+        body: String,
+        /// A personal note for every repository (preferences), kept in your
+        /// config dir instead of `.kitsu/memory/`.
+        #[arg(long)]
+        personal: bool,
+    },
+    /// Memory notes and whether they are still current.
+    Memory,
 }
 
 pub fn main() -> std::process::ExitCode {
@@ -268,6 +291,15 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
         }
         Cmd::Log { run, since, follow } => log(&ws, run, since, follow, json),
         Cmd::Stats => stats_cmd(&ws, json),
+        Cmd::Remember {
+            title,
+            kind,
+            scope,
+            anchor,
+            body,
+            personal,
+        } => remember(&ws, &title, &kind, scope, anchor, &body, personal),
+        Cmd::Memory => memory_cmd(&ws, json),
         Cmd::Recover => {
             let store = ws.open_store()?;
             let r = recover::recover(&ws, &store)?;
@@ -416,7 +448,7 @@ fn new(
 ) -> Result<()> {
     let kind = Kind::parse(kind).ok_or_else(|| {
         Error::Invalid(format!(
-            "unknown kind `{kind}` (task, decision, invariant, question)"
+            "unknown kind `{kind}` (task, decision, invariant, question, memory)"
         ))
     })?;
     let text = render_new(kind, title, &scope, &checks, &after, &blocks);
@@ -462,12 +494,18 @@ pub fn render_new(
             list(scope)
         )),
         Kind::Question => front.push_str(&format!("blocks = {}\n", list(blocks))),
+        Kind::Memory => front.push_str(&format!(
+            "kind = \"fact\"\nscope = {}\nanchors = {}\n",
+            list(scope),
+            list(scope)
+        )),
     }
     let body = match kind {
         Kind::Task => "What should be true when this is done, and why.\n",
         Kind::Invariant => "Why this must hold, and what breaks if it doesn't.\n",
         Kind::Decision => "Context, the choice, and what it costs.\n",
         Kind::Question => "What we need to know and what depends on it.\n",
+        Kind::Memory => "What the next person or agent should know, and how you know it.\n",
     };
     format!("+++\n{front}+++\n{body}")
 }
@@ -775,6 +813,7 @@ fn brief_cmd(
             base: head.as_deref(),
             worktree: None,
             run: None,
+            personal: &crate::memory::personal(&crate::workspace::config_dir()),
             budget,
         },
         t,
@@ -1180,6 +1219,107 @@ fn accept(
             std::process::ExitCode::from(2)
         }
     })
+}
+
+fn remember(
+    ws: &Workspace,
+    title: &str,
+    kind: &str,
+    scope: Vec<String>,
+    anchor: Vec<String>,
+    body: &str,
+    personal: bool,
+) -> Result<()> {
+    let kind = intent::MemoryKind::parse(kind).ok_or_else(|| {
+        Error::Invalid(format!(
+            "unknown memory kind `{kind}` (fact, gotcha, convention, preference, lesson)"
+        ))
+    })?;
+    let list = |v: &[String]| {
+        format!(
+            "[{}]",
+            v.iter().map(|s| toml_str(s)).collect::<Vec<_>>().join(", ")
+        )
+    };
+    let anchors = if anchor.is_empty() {
+        scope.clone()
+    } else {
+        anchor
+    };
+    let mut front = format!(
+        "title = {}\nkind = \"{}\"\n",
+        toml_str(title),
+        kind.as_str()
+    );
+    if !personal {
+        front.push_str(&format!(
+            "scope = {}\nanchors = {}\n",
+            list(&scope),
+            list(&anchors)
+        ));
+    }
+    let body = if body.trim().is_empty() {
+        "How you know this, and what would make it stop being true.\n".to_string()
+    } else {
+        format!("{}\n", body.trim_end())
+    };
+    let text = format!("+++\n{front}+++\n{body}");
+    let path = if personal {
+        let dir = crate::workspace::config_dir().join("memory");
+        std::fs::create_dir_all(&dir).map_err(|e| Error::io(dir.display().to_string(), e))?;
+        let p = dir.join(format!("{}.md", slugify(title)));
+        if p.exists() {
+            return Err(Error::Conflict(format!("{} already exists", p.display())));
+        }
+        std::fs::write(&p, text).map_err(|e| Error::io(p.display().to_string(), e))?;
+        p
+    } else {
+        write_new(ws, Kind::Memory, title, None, &text)?
+    };
+    println!("{}", path.display());
+    Ok(())
+}
+
+fn memory_cmd(ws: &Workspace, json: bool) -> Result<()> {
+    use crate::memory::{self, Freshness};
+    let intent = Intent::load_dir(&ws.root)?;
+    let git = ws.git();
+    let fresh = match git.head()? {
+        Some(h) => memory::freshness(&git, &h, intent.memory.values())?,
+        None => Default::default(),
+    };
+    let personal = memory::personal(&crate::workspace::config_dir());
+    if json {
+        let rows: Vec<_> = intent
+            .memory
+            .values()
+            .chain(personal.notes.iter())
+            .map(|m| json!({ "id": m.id, "title": m.title, "kind": m.kind, "path": m.source.path, "freshness": fresh.get(&m.id) }))
+            .collect();
+        println!(
+            "{}",
+            json!({ "notes": rows, "problems": personal.problems })
+        );
+        return Ok(());
+    }
+    if intent.memory.is_empty() && personal.notes.is_empty() {
+        println!("nothing remembered yet; `kitsu remember \"...\" --kind gotcha --scope <paths>`");
+    }
+    for m in intent.memory.values().chain(personal.notes.iter()) {
+        let state = match fresh.get(&m.id) {
+            Some(Freshness::Stale { changed, .. }) => {
+                paint(&format!("stale: {} changed", changed.join(", ")), YELLOW)
+            }
+            Some(Freshness::Uncommitted) => paint("not committed", DIM),
+            Some(Freshness::Current) => paint("current", GREEN),
+            _ => String::new(),
+        };
+        println!("{:<11} {:<28} {}  {state}", m.kind.as_str(), m.id, m.title);
+    }
+    for (p, d) in &personal.problems {
+        println!("{} {p}: {d}", paint("problem:", RED));
+    }
+    Ok(())
 }
 
 fn stats_cmd(ws: &Workspace, json: bool) -> Result<()> {

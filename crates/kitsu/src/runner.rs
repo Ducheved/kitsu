@@ -183,6 +183,7 @@ pub fn prepare(ws: &Workspace, store: &Store, me: &Instance, opts: &Options) -> 
                 base: Some(&base),
                 worktree: Some(&wt_str),
                 run: Some(&run),
+                personal: &crate::memory::personal(&crate::workspace::config_dir()),
                 budget: brief::DEFAULT_BUDGET,
             },
             task,

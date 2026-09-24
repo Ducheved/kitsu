@@ -198,11 +198,18 @@ pub async fn overview(state: State<'_, AppState>) -> R<Value> {
         let since = digest::since(&store, seen)?;
         let asks = store.open_asks()?;
         let agents: Vec<Value> = agents::all()?.into_iter().map(|a| json!({ "name": a.name, "command": a.command.join(" "), "source": a.source })).collect();
-        let problems: Vec<Value> = intent.problems.iter().map(|p| json!({ "path": p.path, "detail": p.detail })).collect();
+        let personal = kitsu::memory::personal(&kitsu::workspace::config_dir());
+        let problems: Vec<Value> = intent
+            .problems
+            .iter()
+            .map(|p| json!({ "path": p.path, "detail": p.detail }))
+            .chain(personal.problems.iter().map(|(p, d)| json!({ "path": p, "detail": d })))
+            .collect();
         let counts = json!({
             "invariants": intent.invariants.len(),
             "decisions": intent.decisions.len(),
             "open_questions": intent.questions.values().filter(|q| q.state == QuestionState::Open).count(),
+            "memory": intent.memory.len(),
             "checks": intent.config.checks.len(),
         });
         Ok(json!({ "repo": repo_info(&w)?, "tasks": tasks, "asks": asks, "since": since, "agents": agents, "problems": problems, "counts": counts }))
@@ -229,7 +236,7 @@ pub async fn task_detail(state: State<'_, AppState>, id: String) -> R<Value> {
         let task = intent.tasks.get(&id).ok_or_else(|| Error::NotFound(format!("task {id}")))?;
         let git = w.git();
         let head = git.head()?;
-        let b = brief::compile(&Context { intent: &intent, git: Some(&git), store: Some(&store), base: head.as_deref(), worktree: None, run: None, budget: brief::DEFAULT_BUDGET }, task);
+        let b = brief::compile(&Context { intent: &intent, git: Some(&git), store: Some(&store), base: head.as_deref(), worktree: None, run: None, personal: &kitsu::memory::personal(&kitsu::workspace::config_dir()), budget: brief::DEFAULT_BUDGET }, task);
         let runs = store.runs_for_task(&id)?;
         let state = match task.state {
             intent::TaskState::Open => "open",
@@ -560,7 +567,25 @@ pub async fn rules(state: State<'_, AppState>) -> R<Value> {
             .values()
             .map(|c| -> R<Value> { Ok(json!({ "name": c.name, "run": c.run, "scope": c.scope.globs(), "status": status_at(&git, &store, c, &tree)? })) })
             .collect::<R<_>>()?;
-        Ok(json!({ "invariants": invariants, "decisions": decisions, "questions": questions, "checks": checks }))
+        // Staleness against HEAD: uncommitted edits to anchors don't count
+        // until committed, same as for runs.
+        let fresh = match git.head()? {
+            Some(h) => kitsu::memory::freshness(&git, &h, intent.memory.values())?,
+            None => Default::default(),
+        };
+        let personal = kitsu::memory::personal(&kitsu::workspace::config_dir());
+        let memory: Vec<Value> = intent
+            .memory
+            .values()
+            .map(|m| (m, fresh.get(&m.id).cloned()))
+            .chain(personal.notes.iter().map(|m| (m, Some(kitsu::memory::Freshness::Unanchored))))
+            .map(|(m, f)| {
+                json!({ "id": m.id, "title": m.title, "kind": m.kind, "scope": m.scope.globs(), "anchors": m.anchors.globs(),
+                        "by": m.by, "run": m.run, "body": m.body, "path": m.source.path, "freshness": f,
+                        "personal": m.id.starts_with("personal/") })
+            })
+            .collect();
+        Ok(json!({ "invariants": invariants, "decisions": decisions, "questions": questions, "memory": memory, "checks": checks }))
     })
     .await
 }

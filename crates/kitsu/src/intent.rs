@@ -26,10 +26,17 @@ pub enum Kind {
     Decision,
     Invariant,
     Question,
+    Memory,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::Task, Kind::Decision, Kind::Invariant, Kind::Question];
+    pub const ALL: [Kind; 5] = [
+        Kind::Task,
+        Kind::Decision,
+        Kind::Invariant,
+        Kind::Question,
+        Kind::Memory,
+    ];
 
     pub fn dir(self) -> &'static str {
         match self {
@@ -37,6 +44,7 @@ impl Kind {
             Kind::Decision => "decisions",
             Kind::Invariant => "invariants",
             Kind::Question => "questions",
+            Kind::Memory => "memory",
         }
     }
 
@@ -46,6 +54,7 @@ impl Kind {
             Kind::Decision => "decision",
             Kind::Invariant => "invariant",
             Kind::Question => "question",
+            Kind::Memory => "memory",
         }
     }
 
@@ -132,6 +141,68 @@ pub struct Decision {
     pub source: Source,
 }
 
+/// What sort of thing a memory note records. The kind decides how it's
+/// presented, not whether it's true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryKind {
+    /// Something true about the system: "upstream dedupes keys for 24h".
+    Fact,
+    /// A trap: "the test suite passes with the network off only because...".
+    Gotcha,
+    /// How things are done here: "errors are wrapped with context, never logged and returned".
+    Convention,
+    /// What a person wants: "small commits", "no new dependencies without asking".
+    Preference,
+    /// What an earlier attempt taught: "mocking the clock hid the retry bug".
+    Lesson,
+}
+
+impl MemoryKind {
+    pub const ALL: [MemoryKind; 5] = [
+        MemoryKind::Fact,
+        MemoryKind::Gotcha,
+        MemoryKind::Convention,
+        MemoryKind::Preference,
+        MemoryKind::Lesson,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MemoryKind::Fact => "fact",
+            MemoryKind::Gotcha => "gotcha",
+            MemoryKind::Convention => "convention",
+            MemoryKind::Preference => "preference",
+            MemoryKind::Lesson => "lesson",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<MemoryKind> {
+        MemoryKind::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+}
+
+/// A note worth keeping between runs, with where it came from and what it
+/// depends on. `anchors` are the paths whose content the note describes;
+/// when they change after the note was last committed, the note is stale
+/// (see `memory::freshness`). No hashes in the file: git knows when the
+/// note was written and what the anchors looked like then.
+#[derive(Debug, Clone)]
+pub struct Memory {
+    pub id: String,
+    pub title: String,
+    pub kind: MemoryKind,
+    /// Where it applies, for deciding which briefs include it.
+    pub scope: Scope,
+    pub anchors: Scope,
+    /// Who wrote it: a person or an agent name.
+    pub by: Option<String>,
+    /// The run it came out of, if any.
+    pub run: Option<String>,
+    pub body: String,
+    pub source: Source,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvariantState {
     Active,
@@ -183,6 +254,7 @@ pub struct Intent {
     pub decisions: BTreeMap<String, Decision>,
     pub invariants: BTreeMap<String, Invariant>,
     pub questions: BTreeMap<String, Question>,
+    pub memory: BTreeMap<String, Memory>,
     pub problems: Vec<Problem>,
 }
 
@@ -351,6 +423,10 @@ impl Intent {
                         source,
                     },
                 );
+            }
+            Kind::Memory => {
+                let m = parse_memory(&id, front, body, source)?;
+                self.memory.insert(id, m);
             }
             Kind::Question => {
                 let f: QuestionFront = toml::from_str(front).map_err(|e| toml_msg(&e))?;
@@ -540,6 +616,7 @@ impl Intent {
             Kind::Decision => self.decisions.keys().cloned().collect(),
             Kind::Invariant => self.invariants.keys().cloned().collect(),
             Kind::Question => self.questions.keys().cloned().collect(),
+            Kind::Memory => self.memory.keys().cloned().collect(),
         }
     }
 }
@@ -639,6 +716,47 @@ struct TaskFront {
     checks: Vec<String>,
     #[serde(default)]
     after: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryFront {
+    title: Option<String>,
+    kind: Option<String>,
+    #[serde(default)]
+    scope: Vec<String>,
+    #[serde(default)]
+    anchors: Vec<String>,
+    by: Option<String>,
+    run: Option<String>,
+}
+
+/// Also used for personal notes outside the repository.
+pub fn parse_memory(id: &str, front: &str, body: &str, source: Source) -> Result<Memory, String> {
+    let f: MemoryFront = toml::from_str(front).map_err(|e| toml_msg(&e))?;
+    let kind = match f.kind.as_deref() {
+        None => {
+            return Err(
+                "memory note needs a `kind` (fact, gotcha, convention, preference, lesson)".into(),
+            );
+        }
+        Some(k) => MemoryKind::parse(k).ok_or_else(|| {
+            format!("unknown memory kind `{k}` (fact, gotcha, convention, preference, lesson)")
+        })?,
+    };
+    Ok(Memory {
+        id: id.to_string(),
+        title: f
+            .title
+            .unwrap_or_else(|| first_heading(body).unwrap_or_else(|| id.to_string())),
+        kind,
+        scope: Scope::new(f.scope),
+        anchors: Scope::new(f.anchors),
+        by: f.by,
+        run: f.run,
+        body: body.to_string(),
+        source,
+    })
 }
 
 #[derive(Deserialize)]

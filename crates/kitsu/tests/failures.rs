@@ -692,3 +692,50 @@ fn token_usage_is_recorded_when_reported_and_never_invented() {
         "briefs are measured: {json}"
     );
 }
+
+#[test]
+fn memory_goes_stale_with_its_code_and_reaches_the_brief() {
+    let env = Env::new("memory");
+    let path = env.ok(&[
+        "remember",
+        "Upstream dedupes idempotency keys for 24 hours",
+        "--kind",
+        "fact",
+        "--scope",
+        "payments.py",
+        "--body",
+        "From their API docs, section Idempotency.",
+    ]);
+    assert!(
+        path.trim()
+            .ends_with(".kitsu/memory/upstream-dedupes-idempotency-keys-for-24-hours.md"),
+        "{path}"
+    );
+    git(&env.repo, &["add", "-A"]);
+    git(&env.repo, &["commit", "-qm", "remember dedupe"]);
+    let list = env.ok(&["memory"]);
+    assert!(list.contains("current"), "{list}");
+
+    let brief = env.ok(&["brief", "bounded-retries"]);
+    assert!(
+        brief.contains("Upstream dedupes idempotency keys for 24 hours"),
+        "{brief}"
+    );
+    assert!(!brief.contains("May be out of date"), "{brief}");
+
+    let p = env.repo.join("payments.py");
+    let text = std::fs::read_to_string(&p).expect("read");
+    std::fs::write(&p, format!("{text}\n# touched\n")).expect("write");
+    git(&env.repo, &["commit", "-qam", "touch payments"]);
+    let list = env.ok(&["memory"]);
+    assert!(list.contains("stale: payments.py changed"), "{list}");
+    let brief = env.ok(&["brief", "bounded-retries"]);
+    assert!(
+        brief.contains("May be out of date: payments.py changed"),
+        "{brief}"
+    );
+
+    let bad = env.out(&["remember", "x", "--kind", "rumor"]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("unknown memory kind"));
+}
