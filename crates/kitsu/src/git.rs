@@ -207,7 +207,21 @@ impl Git {
                 .map_err(|e| Error::io(format!("copying {}", real.display()), e))?;
         }
         let result = (|| {
-            let mut add = self.command(["add", "-A", "--", "."]);
+            self.unhide_in(&tmp)?;
+            // Stat shortcuts can skip a modified file; this hash is what
+            // evidence gets bound to, so don't take them.
+            let mut add = self.command([
+                "-c",
+                "core.ignoreStat=false",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.untrackedCache=false",
+                "add",
+                "-A",
+                "--",
+                ".",
+            ]);
             add.env("GIT_INDEX_FILE", &tmp);
             self.output_of(add, "add -A (scratch index)".into())?;
             let mut write = self.command(["write-tree"]);
@@ -217,6 +231,69 @@ impl Git {
         })();
         let _ = std::fs::remove_file(&tmp);
         result
+    }
+
+    /// In a scratch index, clear the flags that make `git add` ignore a
+    /// modified file: assume-unchanged, and skip-worktree for files that are
+    /// actually on disk. A skip-worktree file that isn't there (a sparse
+    /// checkout) keeps its flag, so its absence isn't read as a deletion.
+    fn unhide_in(&self, index: &Path) -> Result<()> {
+        let mut ls = self.command(["ls-files", "-v", "-z"]);
+        ls.env("GIT_INDEX_FILE", index);
+        let out = self.output_of(ls, "ls-files -v (scratch index)".into())?;
+        let mut assumed = String::new();
+        let mut skipped = String::new();
+        for rec in split_z(&out.stdout) {
+            let Some((tag, path)) = rec.split_once(' ') else {
+                continue;
+            };
+            let tag = tag.chars().next().unwrap_or('H');
+            if tag.is_ascii_lowercase() {
+                assumed.push_str(path);
+                assumed.push('\0');
+            }
+            if tag.eq_ignore_ascii_case(&'s') && self.dir.join(path).exists() {
+                skipped.push_str(path);
+                skipped.push('\0');
+            }
+        }
+        for (flag, paths) in [
+            ("--no-assume-unchanged", assumed),
+            ("--no-skip-worktree", skipped),
+        ] {
+            if paths.is_empty() {
+                continue;
+            }
+            let mut cmd = self.command(["update-index", flag, "-z", "--stdin"]);
+            cmd.env("GIT_INDEX_FILE", index)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+            let mut child = cmd
+                .spawn()
+                .map_err(|e| Error::io("spawning git update-index", e))?;
+            {
+                use std::io::Write;
+                let mut stdin = child
+                    .stdin
+                    .take()
+                    .ok_or_else(|| Error::Invalid("update-index stdin".into()))?;
+                stdin
+                    .write_all(paths.as_bytes())
+                    .map_err(|e| Error::io("writing to git update-index", e))?;
+            }
+            let out = child
+                .wait_with_output()
+                .map_err(|e| Error::io("git update-index", e))?;
+            if !out.status.success() {
+                return Err(Error::Git {
+                    args: format!("update-index {flag}"),
+                    code: out.status.code(),
+                    stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Paths that differ between two trees (or commits).
@@ -639,6 +716,48 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::testing::TempRepo;
+
+    #[test]
+    fn worktree_tree_sees_changes_git_was_told_to_ignore() {
+        // Evidence is bound to this hash. If a flag in the user's index or
+        // config makes `git add` skip a modified file, a check that ran on
+        // the modified file would be recorded against the old content.
+        let repo = TempRepo::new(&[("a.txt", "1\n"), ("b.txt", "1\n"), ("c.txt", "1\n")]);
+        let git = repo.git();
+        let scratch = repo.root.join(".git/kitsu/scratch");
+        let clean = git.worktree_tree(&scratch).expect("tree");
+        git.run(["update-index", "--assume-unchanged", "a.txt"])
+            .expect("assume");
+        git.run(["update-index", "--skip-worktree", "b.txt"])
+            .expect("skip");
+        git.run(["config", "core.ignoreStat", "true"])
+            .expect("ignorestat");
+        repo.write("a.txt", "2\n");
+        repo.write("b.txt", "2\n");
+        repo.write("c.txt", "2\n");
+        let dirty = git.worktree_tree(&scratch).expect("tree");
+        let changed = git.changed_paths(&clean, &dirty).expect("diff");
+        assert_eq!(
+            changed,
+            ["a.txt", "b.txt", "c.txt"],
+            "every modified file is in the hash"
+        );
+        let flags = git
+            .run(["ls-files", "-v", "a.txt", "b.txt"])
+            .expect("ls-files");
+        assert_eq!(
+            flags, "h a.txt\nS b.txt\n",
+            "the user's own index keeps its flags"
+        );
+        // A sparse checkout's skip-worktree files are simply absent: that is
+        // not a deletion.
+        std::fs::remove_file(repo.root.join("b.txt")).expect("rm");
+        let sparse = git.worktree_tree(&scratch).expect("tree");
+        assert_eq!(
+            git.changed_paths(&clean, &sparse).expect("diff"),
+            ["a.txt", "c.txt"]
+        );
+    }
 
     #[test]
     fn reading_many_blobs_does_not_deadlock_on_full_pipes() {
