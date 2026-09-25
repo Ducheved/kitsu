@@ -35,7 +35,8 @@ them is a projection.
 | Runs, their lifecycle, custody | `state.db` | sole writer via transactions |
 | Evidence (check results) | `state.db`, keyed by check fingerprint + tree hash | runs checks, records results |
 | Check logs, briefs | content-addressed blobs next to the db | writes once |
-| The agent loop, model, tools, its own memory | the agent | none; replaceable over ACP |
+| The agent loop, model, tools, its own memory | the agent (external, over ACP) | none; replaceable |
+| The same, for Kitsu's own loop | Kitsu: the brain owns the conversation, the host owns tools, journal and `finish` | see `crates/kitsu/src/agent/` and decision `own-loop` |
 | Unsaved editor text | the window | saves with a version check |
 | Language intelligence | not in the first cut | see `.kitsu/decisions/no-index-no-lsp-yet.md` |
 | Process isolation | nobody yet | documented gap; `.kitsu/tasks/sandbox-linux.md` |

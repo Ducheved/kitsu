@@ -108,6 +108,45 @@ command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
 
 Agent commands only ever come from your config, never from the repository.
 
+## Kitsu's own agent
+
+Through an external agent, Kitsu can only put advice into someone else's
+context: after Claude Code compacted its conversation, none of a brief sent
+as a message survived. So Kitsu also has its own loop, for any
+OpenAI-compatible endpoint (OpenRouter, a local server):
+
+```toml
+[agents.kitsu]
+native = { base_url = "https://openrouter.ai/api/v1", model = "<model id>", api_key_env = "OPENROUTER_API_KEY" }
+# optional: context_window, max_output, turns (per run), tokens (per run)
+```
+
+```sh
+kitsu run <task> --agent kitsu
+kitsu run <task> --agent kitsu --from <run> --resume   # after a crash or a budget stop
+```
+
+What it does differently:
+
+- **The brief never leaves the context.** It's a fixed system message; the
+  run's state (what changed, where each required check stands on the files
+  right now, budget left) is re-rendered as the last message of every
+  request. Compaction touches only the conversation: old tool outputs become
+  pointers, older steps a digest rebuilt from the journal.
+- **Done is a request.** `finish` makes Kitsu run the required checks; a
+  failure goes back to the model, and after three refusals the run stops.
+- **Every effect is journaled before it happens.** After a crash, `--resume`
+  settles a write by the file's hash and never re-runs a command whose
+  outcome is unknown.
+- **Tools instead of a shell,** with closed schemas and bounded output; the
+  shell is one tool among twelve, under the same policy and CPU limits.
+- **The key is named, not stored.** It's read from `api_key_env`, sent in one
+  header, and never written to the journal, logs or the tools' environment.
+
+The loop is a brain (model calls) and a host (tools, journal, checks) that
+talk only in JSON-RPC, so the brain can later run elsewhere while your
+machine keeps the hands.
+
 ## The desktop app
 
 ```sh
@@ -178,7 +217,8 @@ Verified here means an automated test or a measurement in this repo does it.
 | 100 concurrent runs: 0 failures, ≤1.2% of one core idle, 2–3 ms status refresh | `examples/scale.rs stress`, in CI |
 | Desktop app on Linux (WebKitGTK): open repo, review, accept with `a`, start a run | driven by hand under Xvfb |
 | UI flows and screens | Chromium on fixture data |
-| **Real agents** (Claude, Codex, Gemini adapters) | **not yet**: only the scripted agent. Protocol details beyond ACP v1 basics are untested |
+| Kitsu's own loop: fixing the fixture task, false done ×3, compaction at the threshold and after an overflow, crash-and-resume at three points, loop signal, cancel, retries, path confinement, the key never written | 15 end-to-end tests against a scripted model server |
+| **Real agents** (Claude, Codex, Gemini adapters) | **partly**: Claude Code through `kitsu run` against a stub model (compaction probe). A live model on the own loop: not yet |
 | **macOS and Windows** | **not built or run yet**. Stop on Windows falls back to a 1 s poll; orphan cleanup is Linux-only |
 | **Sandboxing** | **none**. Worktrees isolate changes, not processes. Agents run with your permissions |
 
