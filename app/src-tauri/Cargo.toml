@@ -1,6 +1,6 @@
 [package]
 name = "kitsu-app"
-version = "0.1.0"
+version = "0.2.0"
 description = "Kitsu desktop app"
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "kitsu"
-version = "0.1.0"
+version = "0.2.0"
 description = "Engineering state for humans and coding agents: tasks, checks, evidence, isolated runs."
 edition.workspace = true
 rust-version.workspace = true
