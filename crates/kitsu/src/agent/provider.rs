@@ -1,5 +1,13 @@
-//! Talking to a model: OpenAI-compatible Chat Completions (OpenRouter and
-//! anything that speaks the same API), streamed.
+//! Talking to a model, streamed, in one of three wire formats:
+//! OpenAI-compatible Chat Completions (OpenRouter and anything that speaks
+//! the same API), Anthropic Messages (`anthropic.rs`) and OpenAI Responses
+//! (`responses.rs`).
+//!
+//! The conversation (`Msg`) is the same for all three; each provider only
+//! renders it into its request body and reads its stream back into a
+//! `Reply`. What a format needs carried back that the conversation can't
+//! express (Responses' reasoning items) rides in `Reply::replay`, which the
+//! brain journals with the reply and each later request renders verbatim.
 //!
 //! Streaming isn't for showing tokens as they come: idle proxies cut long
 //! non-streamed requests, and a cancel should drop the request right away.
@@ -10,6 +18,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
+use super::anthropic::Messages;
+use super::responses::Responses;
 use crate::agents::NativeSpec;
 
 /// An API key. Never printed, never serialized; attached to one header.
@@ -21,6 +31,13 @@ impl std::fmt::Debug for Secret {
     }
 }
 
+impl Secret {
+    /// The `authorization` header's value.
+    pub fn bearer(&self) -> String {
+        format!("Bearer {}", self.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Msg {
     System(String),
@@ -28,6 +45,9 @@ pub enum Msg {
     Assistant {
         text: Option<String>,
         calls: Vec<ToolCall>,
+        /// What the provider that wrote this reply asked to get back
+        /// verbatim (see `Reply::replay`). Other providers ignore it.
+        replay: Option<Value>,
     },
     Tool {
         call_id: String,
@@ -50,13 +70,21 @@ pub struct Reply {
     pub calls: Vec<ToolCall>,
     pub finish: Option<String>,
     pub usage: ReplyUsage,
+    /// `{"provider": <name>, ...}`: provider state later requests must
+    /// carry (Responses' encrypted reasoning). Journaled with the reply, so
+    /// a resumed run sends the same input.
+    pub replay: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ReplyUsage {
+    /// Every input token, read from the cache or not.
     pub prompt: Option<u64>,
     pub completion: Option<u64>,
+    /// Input tokens read from the provider's cache.
     pub cached: Option<u64>,
+    /// Input tokens written to it (Anthropic's cache creation).
+    pub cache_write: Option<u64>,
     pub cost: Option<f64>,
 }
 
@@ -97,6 +125,192 @@ impl ProviderError {
     }
 }
 
+/// What `NativeSpec::provider` may name.
+pub const PROVIDERS: &[&str] = &["openai-chat", "anthropic-messages", "openai-responses"];
+
+pub enum Provider {
+    Chat(OpenAiChat),
+    Messages(Messages),
+    Responses(Responses),
+}
+
+impl Provider {
+    /// Finds the key (in the environment variable or the keychain entry the
+    /// spec names) and builds the client. A missing key is an error here,
+    /// before any request.
+    pub fn new(spec: &NativeSpec) -> Result<Provider, String> {
+        let key = key(spec)?;
+        let http = client()?;
+        let base = spec.base_url.trim_end_matches('/');
+        let model = spec.model.clone();
+        let max_output = spec.max_output;
+        Ok(match spec.provider.as_str() {
+            // Each URL follows its vendor's convention for a base URL
+            // (ANTHROPIC_BASE_URL has no version, OPENAI_BASE_URL has one).
+            "anthropic-messages" => Provider::Messages(Messages {
+                http,
+                url: format!("{base}/v1/messages"),
+                model,
+                max_output,
+                key,
+            }),
+            "openai-responses" => Provider::Responses(Responses {
+                http,
+                url: format!("{base}/responses"),
+                model,
+                max_output,
+                key,
+            }),
+            _ => Provider::Chat(OpenAiChat {
+                http,
+                url: format!("{base}/chat/completions"),
+                cache: marks_cache(&model),
+                model,
+                max_output,
+                key,
+            }),
+        })
+    }
+
+    /// The request body, without the key. Also what `request_sha` hashes.
+    /// `tools` come in Chat Completions' shape (`tools::definitions`).
+    pub fn body(&self, messages: &[Msg], tools: &Value) -> Value {
+        match self {
+            Provider::Chat(p) => p.body(messages, tools),
+            Provider::Messages(p) => p.body(messages, tools),
+            Provider::Responses(p) => p.body(messages, tools),
+        }
+    }
+
+    pub async fn complete(
+        &self,
+        body: &Value,
+        cancel: &mut watch::Receiver<bool>,
+    ) -> Result<Reply, ProviderError> {
+        if *cancel.borrow() {
+            return Err(ProviderError::Cancelled);
+        }
+        let send = async {
+            match self {
+                Provider::Chat(p) => p.send(body).await,
+                Provider::Messages(p) => p.send(body).await,
+                Provider::Responses(p) => p.send(body).await,
+            }
+        };
+        tokio::select! {
+            r = send => r,
+            _ = cancel.wait_for(|c| *c) => Err(ProviderError::Cancelled),
+        }
+    }
+}
+
+fn key(spec: &NativeSpec) -> Result<Secret, String> {
+    if let Some(var) = &spec.api_key_env {
+        return std::env::var(var)
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+            .map(Secret)
+            .ok_or_else(|| format!("${var} is not set; the agent needs its API key there"));
+    }
+    match spec.auth.as_deref().and_then(|a| a.strip_prefix("login:")) {
+        Some(provider) => super::login::stored(provider).map(Secret),
+        None => Err("the agent has no key source (api_key_env or auth)".into()),
+    }
+}
+
+/// The HTTP client for model requests and for `kitsu login`.
+pub fn client() -> Result<reqwest::Client, String> {
+    let mut b = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(15 * 60))
+        .user_agent(concat!("kitsu/", env!("CARGO_PKG_VERSION")));
+    // Extra roots (a proxy's CA, a company CA): loaded explicitly, and a
+    // file that is named but unreadable is an error, not a fallback.
+    if let Some(file) = std::env::var_os("SSL_CERT_FILE").filter(|f| !f.is_empty()) {
+        let pem = std::fs::read(&file)
+            .map_err(|e| format!("SSL_CERT_FILE {}: {e}", file.to_string_lossy()))?;
+        for c in reqwest::Certificate::from_pem_bundle(&pem)
+            .map_err(|e| format!("SSL_CERT_FILE {}: {e}", file.to_string_lossy()))?
+        {
+            b = b.add_root_certificate(c);
+        }
+    }
+    b.build().map_err(|e| format!("http client: {e}"))
+}
+
+/// Sends a streamed request and hands each event's data to `on` until `on`
+/// says the response is complete (`Ok(true)`) or the stream ends. HTTP
+/// errors come back classified.
+pub(super) async fn stream(
+    req: reqwest::RequestBuilder,
+    body: &Value,
+    mut on: impl FnMut(&str) -> Result<bool, ProviderError>,
+) -> Result<(), ProviderError> {
+    let resp = req
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .map_err(|e| ProviderError::Transient(format!("request failed: {}", without_url(&e))))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(Duration::from_secs);
+        let text = resp.text().await.unwrap_or_default();
+        return Err(classify(status.as_u16(), &text, retry_after));
+    }
+    let mut sse = Sse::default();
+    let mut resp = resp;
+    loop {
+        match resp.chunk().await {
+            Ok(Some(bytes)) => {
+                for data in sse.push(&bytes) {
+                    if on(&data)? {
+                        return Ok(());
+                    }
+                }
+            }
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                return Err(ProviderError::Transient(format!(
+                    "stream cut: {}",
+                    without_url(&e)
+                )));
+            }
+        }
+    }
+}
+
+pub(super) fn parse_event(data: &str) -> Result<Value, ProviderError> {
+    serde_json::from_str(data)
+        .map_err(|e| ProviderError::Transient(format!("bad stream chunk: {e}")))
+}
+
+/// An error that arrived inside a stream, by the HTTP status it stands for
+/// (Anthropic's `overloaded_error` is a 529 outside a stream), so it's
+/// classified the same way.
+pub(super) fn classify_in_stream(status: u16, message: &str) -> ProviderError {
+    classify(
+        status,
+        &json!({ "error": { "message": message } }).to_string(),
+        None,
+    )
+}
+
+/// Chat Completions' tool list as `(name, description, parameters)`, for
+/// the formats that shape it differently.
+pub(super) fn tool_parts(tools: &Value) -> impl Iterator<Item = (&Value, &Value, &Value)> {
+    tools.as_array().into_iter().flatten().map(|t| {
+        let f = &t["function"];
+        (&f["name"], &f["description"], &f["parameters"])
+    })
+}
+
 pub struct OpenAiChat {
     http: reqwest::Client,
     url: String,
@@ -108,45 +322,6 @@ pub struct OpenAiChat {
 }
 
 impl OpenAiChat {
-    /// Reads the key from the environment variable the spec names. A missing
-    /// key is an error here, before any request.
-    pub fn new(spec: &NativeSpec) -> Result<OpenAiChat, String> {
-        let key = std::env::var(&spec.api_key_env)
-            .ok()
-            .filter(|k| !k.trim().is_empty())
-            .ok_or_else(|| {
-                format!(
-                    "${} is not set; the agent needs its API key there",
-                    spec.api_key_env
-                )
-            })?;
-        let mut b = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .read_timeout(Duration::from_secs(120))
-            .timeout(Duration::from_secs(15 * 60))
-            .user_agent(concat!("kitsu/", env!("CARGO_PKG_VERSION")));
-        // Extra roots (a proxy's CA, a company CA): loaded explicitly, and a
-        // file that is named but unreadable is an error, not a fallback.
-        if let Some(file) = std::env::var_os("SSL_CERT_FILE").filter(|f| !f.is_empty()) {
-            let pem = std::fs::read(&file)
-                .map_err(|e| format!("SSL_CERT_FILE {}: {e}", file.to_string_lossy()))?;
-            for c in reqwest::Certificate::from_pem_bundle(&pem)
-                .map_err(|e| format!("SSL_CERT_FILE {}: {e}", file.to_string_lossy()))?
-            {
-                b = b.add_root_certificate(c);
-            }
-        }
-        let http = b.build().map_err(|e| format!("http client: {e}"))?;
-        Ok(OpenAiChat {
-            http,
-            url: format!("{}/chat/completions", spec.base_url.trim_end_matches('/')),
-            model: spec.model.clone(),
-            max_output: spec.max_output,
-            cache: marks_cache(&spec.model),
-            key: Secret(key),
-        })
-    }
-
     /// The request body, without the key. Also what `request_sha` hashes.
     pub fn body(&self, messages: &[Msg], tools: &Value) -> Value {
         let mut msgs: Vec<Value> = messages.iter().map(to_openai).collect();
@@ -164,72 +339,26 @@ impl OpenAiChat {
         })
     }
 
-    pub async fn complete(
-        &self,
-        body: &Value,
-        cancel: &mut watch::Receiver<bool>,
-    ) -> Result<Reply, ProviderError> {
-        if *cancel.borrow() {
-            return Err(ProviderError::Cancelled);
-        }
-        tokio::select! {
-            r = self.send(body) => r,
-            _ = cancel.wait_for(|c| *c) => Err(ProviderError::Cancelled),
-        }
-    }
-
     async fn send(&self, body: &Value) -> Result<Reply, ProviderError> {
-        let resp = self
+        let req = self
             .http
             .post(&self.url)
-            .header("authorization", format!("Bearer {}", self.key.0))
-            .header("x-title", "Kitsu")
-            .header("content-type", "application/json")
-            .body(body.to_string())
-            .send()
-            .await
-            .map_err(|e| {
-                ProviderError::Transient(format!("request failed: {}", without_url(&e)))
-            })?;
-        let status = resp.status();
-        if !status.is_success() {
-            let retry_after = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .map(Duration::from_secs);
-            let text = resp.text().await.unwrap_or_default();
-            return Err(classify(status.as_u16(), &text, retry_after));
-        }
-        let mut sse = Sse::default();
+            .header("authorization", self.key.bearer())
+            .header("x-title", "Kitsu");
         let mut acc = Accumulator::default();
-        let mut resp = resp;
-        loop {
-            match resp.chunk().await {
-                Ok(Some(bytes)) => {
-                    for data in sse.push(&bytes) {
-                        if data == "[DONE]" {
-                            return acc.finish();
-                        }
-                        let v: Value = serde_json::from_str(&data).map_err(|e| {
-                            ProviderError::Transient(format!("bad stream chunk: {e}"))
-                        })?;
-                        if let Some(err) = v.get("error") {
-                            return Err(classify(400, &json!({ "error": err }).to_string(), None));
-                        }
-                        acc.chunk(&v);
-                    }
-                }
-                Ok(None) => return acc.finish(),
-                Err(e) => {
-                    return Err(ProviderError::Transient(format!(
-                        "stream cut: {}",
-                        without_url(&e)
-                    )));
-                }
+        stream(req, body, |data| {
+            if data == "[DONE]" {
+                return Ok(true);
             }
-        }
+            let v = parse_event(data)?;
+            if let Some(err) = v.get("error") {
+                return Err(classify(400, &json!({ "error": err }).to_string(), None));
+            }
+            acc.chunk(&v);
+            Ok(false)
+        })
+        .await?;
+        acc.finish()
     }
 }
 
@@ -246,7 +375,7 @@ fn to_openai(m: &Msg) -> Value {
     match m {
         Msg::System(t) => json!({ "role": "system", "content": t }),
         Msg::User(t) => json!({ "role": "user", "content": t }),
-        Msg::Assistant { text, calls } => {
+        Msg::Assistant { text, calls, .. } => {
             let mut v = json!({ "role": "assistant", "content": text });
             if !calls.is_empty() {
                 v["tool_calls"] = calls
@@ -333,13 +462,13 @@ pub fn classify(status: u16, body: &str, retry_after: Option<Duration>) -> Provi
 /// Server-sent events: `data:` lines, blank-line separated. Comments
 /// (`: keepalive`, which OpenRouter sends) and other fields are ignored.
 #[derive(Default)]
-struct Sse {
+pub(super) struct Sse {
     buf: Vec<u8>,
     data: String,
 }
 
 impl Sse {
-    fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+    pub(super) fn push(&mut self, bytes: &[u8]) -> Vec<String> {
         self.buf.extend_from_slice(bytes);
         let mut out = Vec::new();
         while let Some(nl) = self.buf.iter().position(|b| *b == b'\n') {
@@ -378,6 +507,7 @@ impl Accumulator {
                 prompt: u["prompt_tokens"].as_u64(),
                 completion: u["completion_tokens"].as_u64(),
                 cached: u["prompt_tokens_details"]["cached_tokens"].as_u64(),
+                cache_write: u["prompt_tokens_details"]["cache_write_tokens"].as_u64(),
                 cost: u["cost"].as_f64(),
             };
         }
@@ -431,6 +561,7 @@ impl Accumulator {
                 .collect(),
             finish: self.finish,
             usage: self.usage,
+            replay: None,
         })
     }
 }
@@ -518,6 +649,7 @@ mod tests {
                     name: "read_file".into(),
                     arguments: "{}".into(),
                 }],
+                replay: None,
             },
             Msg::Tool {
                 call_id: "t1".into(),

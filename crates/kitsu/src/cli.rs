@@ -151,6 +151,12 @@ enum Cmd {
     Recover,
     /// Known agents and how they are started.
     Agents,
+    /// Sign in to a model provider in the browser and keep the key it
+    /// issues in the OS keychain, for `auth = "login:<provider>"`.
+    /// Providers: openrouter.
+    Login { provider: String },
+    /// Remove the key `kitsu login` stored.
+    Logout { provider: String },
     /// Where the tokens went: per agent, per outcome, per task.
     Stats,
     /// Write down something the next person or agent should know.
@@ -244,6 +250,9 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
     let ok = std::process::ExitCode::SUCCESS;
     if let Cmd::Agents = cli.cmd {
         return agents_cmd(cli.json).map(|_| ok);
+    }
+    if let Cmd::Login { provider } | Cmd::Logout { provider } = &cli.cmd {
+        return login_cmd(provider, matches!(cli.cmd, Cmd::Login { .. })).map(|_| ok);
     }
     // Reads the working tree only, so it runs the same in a run's snapshot
     // (where checks run) as in a checkout, with or without a workspace.
@@ -362,7 +371,9 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
             }
             Ok(())
         }
-        Cmd::Agents | Cmd::Arch { .. } => unreachable!("handled above"),
+        Cmd::Agents | Cmd::Arch { .. } | Cmd::Login { .. } | Cmd::Logout { .. } => {
+            unreachable!("handled above")
+        }
     }
     .map(|_| ok)
 }
@@ -1753,6 +1764,29 @@ fn log(ws: &Workspace, run: Option<String>, since: i64, follow: bool, json: bool
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
     }
+}
+
+fn login_cmd(provider: &str, login: bool) -> Result<()> {
+    use crate::agent::login as l;
+    if !login {
+        match l::logout(provider).map_err(Error::Invalid)? {
+            Some(page) => println!(
+                "logged out of {provider}: the key is gone from the keychain. It stays valid until you delete it: {page}"
+            ),
+            None => println!("not logged in to {provider}"),
+        }
+        return Ok(());
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Error::io("starting async runtime", e))?;
+    rt.block_on(l::login(provider, |m| eprintln!("{m}")))
+        .map_err(Error::Invalid)?;
+    println!(
+        "logged in to {provider}; the key is in the OS keychain. Use it with auth = \"login:{provider}\" in agents.toml"
+    );
+    Ok(())
 }
 
 fn agents_cmd(json: bool) -> Result<()> {
