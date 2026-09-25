@@ -1,6 +1,6 @@
 +++
 title = "Many projects in one window: every command names its repository"
-state = "proposed"
+state = "accepted"
 scope = ["app/src-tauri/src/commands.rs", "app/src/lib/api.ts", "app/src/lib/app.svelte.ts", "crates/kitsu/src/workspaces.rs"]
 rejected = [
   "A current repository in the app's state that a switch changes: a command sent just before the switch (an accept, a save) lands in the other repository",

@@ -1,7 +1,7 @@
 +++
 title = "Kitsu's own loop speaks Chat Completions, Anthropic Messages and OpenAI Responses; a key can come from `kitsu login`, kept only in the OS keychain"
 scope = ["crates/kitsu/src/agent/**", "crates/kitsu/src/agents.rs", "crates/kitsu/src/cli.rs", "fixtures/stub-model/**"]
-state = "proposed"
+state = "accepted"
 rejected = [
   "A provider trait with a crate per vendor (async-openai, an Anthropic SDK): three enum arms and one SSE loop are the whole difference, and an SDK would own the retry and error mapping the brain already owns",
   "A conversation per provider: resume, compaction, loop detection and the journal would each need three versions; the fold stays neutral and a provider only renders it",

@@ -1,6 +1,6 @@
 +++
 title = "Typed judgments: probabilities from TypeSafe System One, unknown when there are none, and never more than a skipped question"
-state = "proposed"
+state = "accepted"
 scope = ["crates/kitsu/src/judge.rs", "crates/kitsu/src/agent/host.rs", "crates/kitsu/src/store.rs", "crates/kitsu/src/agents.rs"]
 rejected = [
   "Unknown as no, deny or a default: each caller has its own careful path (for permissions: ask you; for guard flags it will be: require the check), so `judge.rs` returns unknown and lets the caller take it",
