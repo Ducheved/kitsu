@@ -4,9 +4,16 @@
 //! command". Each command below does one thing, validates its arguments,
 //! and goes through the same library the CLI uses. Paths from the UI are
 //! repo-relative and checked against the repository root.
+//!
+//! The window shows several repositories, and every command that touches
+//! one names it: `repo` is the id from the workspaces list. There is no
+//! "current repository" on this side, so a command sent just before a
+//! switch still lands where it was meant to. An id that isn't in the list
+//! is refused; the only way to add one is `add_workspace`.
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use kitsu::brief::{self, Context};
 use kitsu::check::{CheckRun, status_at};
@@ -18,16 +25,109 @@ use kitsu::run::RunEvent;
 use kitsu::status::Snapshot;
 use kitsu::util::{content_id, short_id};
 use kitsu::workspace::{Instance, Workspace};
+use kitsu::workspaces::{self, Entry, List};
 use kitsu::{Error, agents};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tauri::State;
 
-pub struct AppState {
-    pub ws: Mutex<Option<Workspace>>,
-    /// Held for the app's lifetime: accepts made from the UI are owned by
-    /// this process.
-    pub instance: Mutex<Option<Instance>>,
+/// A repository the window has opened: recovered once, and owned by this
+/// process's instance lock until the app exits or it leaves the list.
+struct Open {
+    ws: Workspace,
+    _instance: Instance,
+}
+
+struct Inner {
+    list: List,
+    repos: Mutex<BTreeMap<String, Open>>,
+    cache: workspaces::Cache,
+    /// Where the app was started; offered as the first project.
+    launch_dir: Option<PathBuf>,
+}
+
+/// Cheap to clone: commands move a copy into their worker thread.
+#[derive(Clone)]
+pub struct AppState(Arc<Inner>);
+
+impl AppState {
+    pub fn new(list: List, launch_dir: Option<PathBuf>) -> AppState {
+        AppState(Arc::new(Inner {
+            list,
+            repos: Mutex::new(BTreeMap::new()),
+            cache: workspaces::Cache::default(),
+            launch_dir,
+        }))
+    }
+
+    /// The repository `id` names, opened on first use: its state database,
+    /// crash recovery, an instance lock. Blocking; call it off the async
+    /// runtime. Only ids in the workspaces list resolve.
+    pub fn ws(&self, id: &str) -> R<Workspace> {
+        if let Some(o) = self.lock()?.get(id) {
+            return Ok(o.ws.clone());
+        }
+        let entry = self.entry(id)?;
+        let w = open_entry(&entry)?;
+        let store = w.open_store()?;
+        let instance = Instance::acquire(&w)?;
+        recover::recover(&w, &store)?;
+        let mut repos = self.lock()?;
+        // Another command may have opened it meanwhile; keep the first.
+        let o = repos.entry(id.to_string()).or_insert(Open {
+            ws: w,
+            _instance: instance,
+        });
+        Ok(o.ws.clone())
+    }
+
+    fn entry(&self, id: &str) -> R<Entry> {
+        self.0.list.find(id)?.ok_or_else(|| UiError {
+            kind: "no_repo",
+            message: format!("project {id} is not in the list"),
+        })
+    }
+
+    fn lock(&self) -> R<std::sync::MutexGuard<'_, BTreeMap<String, Open>>> {
+        self.0
+            .repos
+            .lock()
+            .map_err(|_| invalid("state lock poisoned"))
+    }
+
+    /// Repositories opened so far, for the change watcher.
+    pub fn opened(&self) -> Vec<(String, Workspace)> {
+        self.lock()
+            .map(|r| r.iter().map(|(id, o)| (id.clone(), o.ws.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    fn close(&self, id: &str) {
+        if let Ok(mut r) = self.lock() {
+            r.remove(id);
+        }
+    }
+}
+
+/// `Workspace::open` on the listed root, keeping the root exactly as listed
+/// so ids derived from it stay stable.
+fn open_entry(e: &Entry) -> R<Workspace> {
+    if !e.root.is_dir() {
+        return Err(Error::NotFound(format!("{} is gone", e.root.display())).into());
+    }
+    let mut w = Workspace::open(&e.root)?;
+    w.root = e.root.clone();
+    Ok(w)
+}
+
+/// Run `f` on a worker thread with the repository `repo` names.
+async fn in_repo<T, F>(state: &State<'_, AppState>, repo: String, f: F) -> R<T>
+where
+    T: Send + 'static,
+    F: FnOnce(Workspace) -> R<T> + Send + 'static,
+{
+    let st = state.inner().clone();
+    blocking(move || f(st.ws(&repo)?)).await
 }
 
 /// Errors cross the IPC boundary with their category intact, so the UI
@@ -54,18 +154,6 @@ fn invalid(msg: impl Into<String>) -> UiError {
         kind: "invalid",
         message: msg.into(),
     }
-}
-
-fn ws(state: &State<'_, AppState>) -> R<Workspace> {
-    state
-        .ws
-        .lock()
-        .map_err(|_| invalid("state lock poisoned"))?
-        .clone()
-        .ok_or_else(|| UiError {
-            kind: "no_repo",
-            message: "no repository open".into(),
-        })
 }
 
 async fn blocking<T, F>(f: F) -> R<T>
@@ -113,6 +201,7 @@ pub fn safe_path(root: &Path, rel: &str) -> R<PathBuf> {
 
 #[derive(Serialize)]
 pub struct Repo {
+    id: String,
     root: String,
     name: String,
     branch: Option<String>,
@@ -122,42 +211,144 @@ pub struct Repo {
 
 fn repo_info(ws: &Workspace) -> R<Repo> {
     Ok(Repo {
+        id: workspaces::id_of(&ws.root),
         root: ws.root.display().to_string(),
         name: ws
             .root
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default(),
-        branch: ws.git().current_branch()?,
+        branch: ws.current_branch()?,
         trusted: ws.is_trusted()?,
         initialized: ws.root.join(intent::DIR).exists(),
     })
 }
 
+// Workspace-level commands: the list itself. These are the only ones
+// without a `repo` argument (see `every_repo_command_names_its_repo`).
+
+#[derive(Serialize)]
+pub struct Listed {
+    id: String,
+    name: String,
+    root: String,
+}
+
+fn listed(e: &Entry) -> Listed {
+    Listed {
+        id: e.id(),
+        name: e.display_name(),
+        root: e.root.display().to_string(),
+    }
+}
+
+/// The project the app was started in (a git repository around the
+/// current directory), added to the list if it isn't there yet. `None`
+/// when started elsewhere.
 #[tauri::command]
-pub async fn open_repo(state: State<'_, AppState>, path: Option<String>) -> R<Repo> {
-    let start = match path {
-        Some(p) => PathBuf::from(p),
-        None => std::env::current_dir().map_err(|e| invalid(e.to_string()))?,
+pub async fn launch_repo(state: State<'_, AppState>) -> R<Option<Listed>> {
+    let st = state.inner().clone();
+    blocking(move || launch(&st)).await
+}
+
+fn launch(st: &AppState) -> R<Option<Listed>> {
+    let Some(dir) = &st.0.launch_dir else {
+        return Ok(None);
     };
-    let (w, inst) = blocking(move || {
-        let w = Workspace::discover(&start)?;
-        let store = w.open_store()?;
-        let inst = Instance::acquire(&w)?;
-        recover::recover(&w, &store)?;
-        Ok::<_, UiError>((w, inst))
-    })
-    .await?;
-    let info = repo_info(&w)?;
-    *state.ws.lock().map_err(|_| invalid("lock"))? = Some(w);
-    *state.instance.lock().map_err(|_| invalid("lock"))? = Some(inst);
-    Ok(info)
+    let Ok(w) = Workspace::discover(dir) else {
+        return Ok(None);
+    };
+    let (e, _) = st.0.list.add(&w.root, None, true)?;
+    Ok(Some(listed(&e)))
 }
 
 #[tauri::command]
-pub async fn init_repo(state: State<'_, AppState>) -> R<Repo> {
-    let w = ws(&state)?;
+pub async fn list_workspaces(state: State<'_, AppState>) -> R<Vec<Listed>> {
+    let st = state.inner().clone();
+    blocking(move || Ok(st.0.list.load()?.iter().map(listed).collect())).await
+}
+
+/// Add the git repository at `path`. Refused with a reason: not a folder,
+/// not a repository, inside one, already listed. Doesn't trust it.
+#[tauri::command]
+pub async fn add_workspace(
+    state: State<'_, AppState>,
+    path: String,
+    name: Option<String>,
+) -> R<Listed> {
+    let st = state.inner().clone();
+    blocking(move || add(&st, &path, name.as_deref())).await
+}
+
+fn add(st: &AppState, path: &str, name: Option<&str>) -> R<Listed> {
+    let path = path.trim();
+    let expanded = match path.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join(rest))
+            .unwrap_or_else(|| PathBuf::from(path)),
+        None => PathBuf::from(path),
+    };
+    if !expanded.is_absolute() {
+        return Err(invalid(format!(
+            "{path} is not a full path; start it with / or ~/"
+        )));
+    }
+    let (e, _) = st.0.list.add(&expanded, name, false)?;
+    Ok(listed(&e))
+}
+
+/// Take a project off the list. Never deletes anything: its files, rules,
+/// runs and trust stay as they are, and runs in progress keep going.
+#[tauri::command]
+pub async fn remove_workspace(state: State<'_, AppState>, repo: String) -> R<Listed> {
+    let st = state.inner().clone();
     blocking(move || {
+        let e = st.0.list.remove(&repo)?;
+        st.close(&repo);
+        Ok(listed(&e))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn rename_workspace(
+    state: State<'_, AppState>,
+    repo: String,
+    name: Option<String>,
+) -> R<Listed> {
+    let st = state.inner().clone();
+    blocking(move || Ok(listed(&st.0.list.rename(&repo, name.as_deref())?))).await
+}
+
+#[tauri::command]
+pub async fn move_workspace(state: State<'_, AppState>, repo: String, index: usize) -> R<()> {
+    let st = state.inner().clone();
+    blocking(move || Ok(st.0.list.reorder(&repo, index)?)).await
+}
+
+/// Per project: name, branch, what needs you, trusted or not. The switcher
+/// polls this; unchanged repositories are answered from a cache keyed by
+/// a `stat`-only fingerprint.
+#[tauri::command]
+pub async fn workspace_overview(state: State<'_, AppState>) -> R<Vec<workspaces::Summary>> {
+    let st = state.inner().clone();
+    blocking(move || Ok(st.0.cache.overview(&st.0.list.load()?))).await
+}
+
+/// Branches and worktrees of one repository, marked yours or Kitsu's.
+#[tauri::command]
+pub async fn git_view(state: State<'_, AppState>, repo: String) -> R<workspaces::GitView> {
+    in_repo(&state, repo, move |w| Ok(workspaces::git_view(&w)?)).await
+}
+
+#[tauri::command]
+pub async fn open_repo(state: State<'_, AppState>, repo: String) -> R<Repo> {
+    in_repo(&state, repo, move |w| repo_info(&w)).await
+}
+
+#[tauri::command]
+pub async fn init_repo(state: State<'_, AppState>, repo: String) -> R<Repo> {
+    in_repo(&state, repo, move |w| {
         for k in Kind::ALL {
             let d = w.root.join(intent::DIR).join(k.dir());
             std::fs::create_dir_all(&d).map_err(|e| Error::io(d.display().to_string(), e))?;
@@ -176,9 +367,8 @@ pub async fn init_repo(state: State<'_, AppState>) -> R<Repo> {
 }
 
 #[tauri::command]
-pub async fn trust_repo(state: State<'_, AppState>) -> R<Repo> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn trust_repo(state: State<'_, AppState>, repo: String) -> R<Repo> {
+    in_repo(&state, repo, move |w| {
         w.trust()?;
         repo_info(&w)
     })
@@ -187,39 +377,56 @@ pub async fn trust_repo(state: State<'_, AppState>) -> R<Repo> {
 
 /// Everything the main list needs, in one round trip.
 #[tauri::command]
-pub async fn overview(state: State<'_, AppState>) -> R<Value> {
-    let w = ws(&state)?;
-    blocking(move || {
-        let store = w.open_store()?;
-        let intent = Intent::load_dir(&w.root)?;
-        let git = w.git();
-        let tasks = Snapshot { intent: &intent, git: &git, store: &store }.tasks()?;
-        let seen: i64 = store.meta("seen.app")?.and_then(|s| s.parse().ok()).unwrap_or(0);
-        let since = digest::since(&store, seen)?;
-        let asks = store.open_asks()?;
-        let agents: Vec<Value> = agents::all()?.into_iter().map(|a| json!({ "name": a.name, "command": a.command.join(" "), "source": a.source })).collect();
-        let personal = kitsu::memory::personal(&kitsu::workspace::config_dir());
-        let problems: Vec<Value> = intent
-            .problems
-            .iter()
-            .map(|p| json!({ "path": p.path, "detail": p.detail }))
-            .chain(personal.problems.iter().map(|(p, d)| json!({ "path": p, "detail": d })))
-            .collect();
-        let counts = json!({
-            "decisions": intent.decisions.len(),
-            "open_questions": intent.questions.values().filter(|q| q.state == QuestionState::Open).count(),
-            "memory": intent.memory.len(),
-            "checks": intent.config.checks.len(),
-        });
-        Ok(json!({ "repo": repo_info(&w)?, "tasks": tasks, "asks": asks, "since": since, "agents": agents, "problems": problems, "counts": counts }))
-    })
-    .await
+pub async fn overview(state: State<'_, AppState>, repo: String) -> R<Value> {
+    in_repo(&state, repo, move |w| overview_of(&w)).await
+}
+
+fn overview_of(w: &Workspace) -> R<Value> {
+    let store = w.open_store()?;
+    let intent = Intent::load_dir(&w.root)?;
+    let git = w.git();
+    let tasks = Snapshot {
+        intent: &intent,
+        git: &git,
+        store: &store,
+    }
+    .tasks()?;
+    let seen: i64 = store
+        .meta("seen.app")?
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let since = digest::since(&store, seen)?;
+    let asks = store.open_asks()?;
+    let agents: Vec<Value> = agents::all()?
+        .into_iter()
+        .map(|a| json!({ "name": a.name, "command": a.command.join(" "), "source": a.source }))
+        .collect();
+    let personal = kitsu::memory::personal(&kitsu::workspace::config_dir());
+    let problems: Vec<Value> = intent
+        .problems
+        .iter()
+        .map(|p| json!({ "path": p.path, "detail": p.detail }))
+        .chain(
+            personal
+                .problems
+                .iter()
+                .map(|(p, d)| json!({ "path": p, "detail": d })),
+        )
+        .collect();
+    let counts = json!({
+        "decisions": intent.decisions.len(),
+        "open_questions": intent.questions.values().filter(|q| q.state == QuestionState::Open).count(),
+        "memory": intent.memory.len(),
+        "checks": intent.config.checks.len(),
+    });
+    Ok(
+        json!({ "repo": repo_info(w)?, "tasks": tasks, "asks": asks, "since": since, "agents": agents, "problems": problems, "counts": counts }),
+    )
 }
 
 #[tauri::command]
-pub async fn mark_seen(state: State<'_, AppState>, seq: i64) -> R<()> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn mark_seen(state: State<'_, AppState>, repo: String, seq: i64) -> R<()> {
+    in_repo(&state, repo, move |w| {
         w.open_store()?.set_meta("seen.app", &seq.to_string())?;
         Ok(())
     })
@@ -227,9 +434,8 @@ pub async fn mark_seen(state: State<'_, AppState>, seq: i64) -> R<()> {
 }
 
 #[tauri::command]
-pub async fn task_detail(state: State<'_, AppState>, id: String) -> R<Value> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn task_detail(state: State<'_, AppState>, repo: String, id: String) -> R<Value> {
+    in_repo(&state, repo, move |w| {
         let store = w.open_store()?;
         let intent = Intent::load_dir(&w.root)?;
         let task = intent.tasks.get(&id).ok_or_else(|| Error::NotFound(format!("task {id}")))?;
@@ -264,9 +470,13 @@ pub async fn task_detail(state: State<'_, AppState>, id: String) -> R<Value> {
 }
 
 #[tauri::command]
-pub async fn run_detail(state: State<'_, AppState>, id: String, after: i64) -> R<Value> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn run_detail(
+    state: State<'_, AppState>,
+    repo: String,
+    id: String,
+    after: i64,
+) -> R<Value> {
+    in_repo(&state, repo, move |w| {
         let store = w.open_store()?;
         let run = store.run(&id)?;
         let events = store.run_events(&id, after, 2_000)?;
@@ -277,9 +487,8 @@ pub async fn run_detail(state: State<'_, AppState>, id: String, after: i64) -> R
 }
 
 #[tauri::command]
-pub async fn evidence_log(state: State<'_, AppState>, id: i64) -> R<String> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn evidence_log(state: State<'_, AppState>, repo: String, id: i64) -> R<String> {
+    in_repo(&state, repo, move |w| {
         let store = w.open_store()?;
         let e = store.evidence(id)?;
         let blob = e.log.ok_or_else(|| Error::NotFound("log".into()))?;
@@ -301,9 +510,8 @@ pub async fn evidence_log(state: State<'_, AppState>, id: i64) -> R<String> {
 }
 
 #[tauri::command]
-pub async fn review(state: State<'_, AppState>, run: String) -> R<Value> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn review(state: State<'_, AppState>, repo: String, run: String) -> R<Value> {
+    in_repo(&state, repo, move |w| {
         let store = w.open_store()?;
         serde_json::to_value(integrate::review(&w, &store, &run)?)
             .map_err(|e| invalid(e.to_string()))
@@ -312,9 +520,13 @@ pub async fn review(state: State<'_, AppState>, run: String) -> R<Value> {
 }
 
 #[tauri::command]
-pub async fn file_diff(state: State<'_, AppState>, run: String, path: String) -> R<Value> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn file_diff(
+    state: State<'_, AppState>,
+    repo: String,
+    run: String,
+    path: String,
+) -> R<Value> {
+    in_repo(&state, repo, move |w| {
         let store = w.open_store()?;
         let r = integrate::review(&w, &store, &run)?;
         let snap = store.run(&run)?.snapshot.ok_or_else(|| Error::NotFound("snapshot".into()))?;
@@ -331,13 +543,15 @@ pub async fn file_diff(state: State<'_, AppState>, run: String, path: String) ->
 #[tauri::command]
 pub async fn start_run(
     state: State<'_, AppState>,
+    repo: String,
     task: String,
     agent: String,
     policy: String,
     note: Option<String>,
     from: Option<String>,
 ) -> R<String> {
-    let w = ws(&state)?;
+    let st = state.inner().clone();
+    let w = blocking(move || st.ws(&repo)).await?;
     if !matches!(policy.as_str(), "ask" | "auto") {
         return Err(invalid("policy must be ask or auto"));
     }
@@ -388,9 +602,8 @@ pub async fn start_run(
 }
 
 #[tauri::command]
-pub async fn stop_run(state: State<'_, AppState>, id: String) -> R<()> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn stop_run(state: State<'_, AppState>, repo: String, id: String) -> R<()> {
+    in_repo(&state, repo, move |w| {
         let store = w.open_store()?;
         let run = store.run(&id)?;
         if run.state.is_terminal() {
@@ -412,9 +625,13 @@ pub async fn stop_run(state: State<'_, AppState>, id: String) -> R<()> {
 }
 
 #[tauri::command]
-pub async fn answer_ask(state: State<'_, AppState>, id: i64, option: String) -> R<bool> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn answer_ask(
+    state: State<'_, AppState>,
+    repo: String,
+    id: i64,
+    option: String,
+) -> R<bool> {
+    in_repo(&state, repo, move |w| {
         let store = w.open_store()?;
         let ask = store.ask(id)?;
         let valid = ask.request["options"]
@@ -433,9 +650,13 @@ pub async fn answer_ask(state: State<'_, AppState>, id: i64, option: String) -> 
 }
 
 #[tauri::command]
-pub async fn answer_question(state: State<'_, AppState>, id: String, answer: String) -> R<()> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn answer_question(
+    state: State<'_, AppState>,
+    repo: String,
+    id: String,
+    answer: String,
+) -> R<()> {
+    in_repo(&state, repo, move |w| {
         let intent = Intent::load_dir(&w.root)?;
         let q = intent
             .questions
@@ -457,12 +678,12 @@ pub async fn answer_question(state: State<'_, AppState>, id: String, answer: Str
 #[tauri::command]
 pub async fn accept_run(
     state: State<'_, AppState>,
+    repo: String,
     run: String,
     close_task: bool,
     approval: Option<String>,
 ) -> R<Value> {
-    let w = ws(&state)?;
-    blocking(move || {
+    in_repo(&state, repo, move |w| {
         let store = w.open_store()?;
         // Custody for this accept. If the app dies mid-way, recovery sees a
         // dead owner and settles the integration by asking git.
@@ -484,9 +705,11 @@ pub async fn accept_run(
 }
 
 #[tauri::command]
-pub async fn discard_run(state: State<'_, AppState>, run: String) -> R<Vec<String>> {
-    let w = ws(&state)?;
-    blocking(move || Ok(integrate::discard(&w, &w.open_store()?, &run)?)).await
+pub async fn discard_run(state: State<'_, AppState>, repo: String, run: String) -> R<Vec<String>> {
+    in_repo(&state, repo, move |w| {
+        Ok(integrate::discard(&w, &w.open_store()?, &run)?)
+    })
+    .await
 }
 
 // Tauri maps IPC arguments to parameters one to one; grouping them into a
@@ -495,6 +718,7 @@ pub async fn discard_run(state: State<'_, AppState>, run: String) -> R<Vec<Strin
 #[tauri::command]
 pub async fn new_entity(
     state: State<'_, AppState>,
+    repo: String,
     kind: String,
     title: String,
     scope: Vec<String>,
@@ -503,32 +727,49 @@ pub async fn new_entity(
     blocks: Vec<String>,
     body: Option<String>,
 ) -> R<Value> {
-    let w = ws(&state)?;
-    blocking(move || {
-        let kind = Kind::parse(&kind).ok_or_else(|| invalid("unknown kind"))?;
-        if title.trim().is_empty() {
-            return Err(invalid("a title is required"));
-        }
-        let mut text = kitsu::cli::render_new(kind, title.trim(), &scope, &checks, &after, &blocks);
-        if let Some(b) = body.filter(|b| !b.trim().is_empty()) {
-            let (_, default_body) = intent::split_front_matter(&text).map_err(invalid)?;
-            let cut = text.len() - default_body.len();
-            text = format!("{}{}\n", &text[..cut], b.trim_end());
-        }
-        let path = kitsu::cli::write_new(&w, kind, &title, None, &text)?;
-        let id = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(json!({ "id": id, "path": path.strip_prefix(&w.root).unwrap_or(&path).display().to_string() }))
+    in_repo(&state, repo, move |w| {
+        new_entity_in(&w, &kind, &title, &scope, &checks, &after, &blocks, body)
     })
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+fn new_entity_in(
+    w: &Workspace,
+    kind: &str,
+    title: &str,
+    scope: &[String],
+    checks: &[String],
+    after: &[String],
+    blocks: &[String],
+    body: Option<String>,
+) -> R<Value> {
+    let kind = Kind::parse(kind).ok_or_else(|| invalid("unknown kind"))?;
+    if title.trim().is_empty() {
+        return Err(invalid("a title is required"));
+    }
+    let mut text = kitsu::cli::render_new(kind, title.trim(), scope, checks, after, blocks);
+    if let Some(b) = body.filter(|b| !b.trim().is_empty()) {
+        let (_, default_body) = intent::split_front_matter(&text).map_err(invalid)?;
+        let cut = text.len() - default_body.len();
+        text = format!("{}{}\n", &text[..cut], b.trim_end());
+    }
+    let path = kitsu::cli::write_new(w, kind, title, None, &text)?;
+    let id = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok(
+        json!({ "id": id, "path": path.strip_prefix(&w.root).unwrap_or(&path).display().to_string() }),
+    )
 }
 
 /// The task graph for the Plan view: every task with the lists the view
 /// edits, the version of its file, and the checks it can pick from. Status
 /// comes from `overview`, same as the rail.
 #[tauri::command]
-pub async fn plan(state: State<'_, AppState>) -> R<Value> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn plan(state: State<'_, AppState>, repo: String) -> R<Value> {
+    in_repo(&state, repo, move |w| {
         let intent = Intent::load_dir(&w.root)?;
         let tasks: Vec<Value> = intent
             .tasks
@@ -555,14 +796,14 @@ pub async fn plan(state: State<'_, AppState>) -> R<Value> {
 #[tauri::command]
 pub async fn update_task(
     state: State<'_, AppState>,
+    repo: String,
     id: String,
     after: Option<Vec<String>>,
     checks: Option<Vec<String>>,
     scope: Option<Vec<String>>,
     version: Option<String>,
 ) -> R<String> {
-    let w = ws(&state)?;
-    blocking(move || {
+    in_repo(&state, repo, move |w| {
         let lists = kitsu::cli::TaskLists {
             after,
             checks,
@@ -579,9 +820,8 @@ pub async fn update_task(
 }
 
 #[tauri::command]
-pub async fn rules(state: State<'_, AppState>) -> R<Value> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn rules(state: State<'_, AppState>, repo: String) -> R<Value> {
+    in_repo(&state, repo, move |w| {
         let store = w.open_store()?;
         let intent = Intent::load_dir(&w.root)?;
         let git = w.git();
@@ -635,9 +875,8 @@ pub async fn rules(state: State<'_, AppState>) -> R<Value> {
 }
 
 #[tauri::command]
-pub async fn run_checks(state: State<'_, AppState>, names: Vec<String>) -> R<Value> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn run_checks(state: State<'_, AppState>, repo: String, names: Vec<String>) -> R<Value> {
+    in_repo(&state, repo, move |w| {
         if !w.is_trusted()? {
             return Err(UiError {
                 kind: "denied",
@@ -680,9 +919,8 @@ pub struct FileText {
 }
 
 #[tauri::command]
-pub async fn read_file(state: State<'_, AppState>, path: String) -> R<FileText> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn read_file(state: State<'_, AppState>, repo: String, path: String) -> R<FileText> {
+    in_repo(&state, repo, move |w| {
         let full = safe_path(&w.root, &path)?;
         let meta = std::fs::metadata(&full).map_err(|e| Error::io(path.clone(), e))?;
         if meta.len() > 16 * 1024 * 1024 {
@@ -710,40 +948,42 @@ pub async fn read_file(state: State<'_, AppState>, path: String) -> R<FileText> 
 #[tauri::command]
 pub async fn write_file(
     state: State<'_, AppState>,
+    repo: String,
     path: String,
     text: String,
     version: Option<String>,
 ) -> R<String> {
-    let w = ws(&state)?;
-    blocking(move || {
-        let full = safe_path(&w.root, &path)?;
-        let current = match std::fs::read(&full) {
-            Ok(b) => Some(content_id(&b)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(Error::io(path.clone(), e).into()),
-        };
-        if current != version {
-            return Err(UiError {
-                kind: "conflict",
-                message: format!("{path} changed on disk since you opened it"),
-            });
-        }
-        if let Some(parent) = full.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| Error::io(parent.display().to_string(), e))?;
-        }
-        let tmp = full.with_extension(format!("kitsu-save-{}", short_id('s')));
-        std::fs::write(&tmp, &text).map_err(|e| Error::io(tmp.display().to_string(), e))?;
-        std::fs::rename(&tmp, &full).map_err(|e| Error::io(path.clone(), e))?;
-        Ok(content_id(text.as_bytes()))
+    in_repo(&state, repo, move |w| {
+        write_file_in(&w, &path, &text, version)
     })
     .await
 }
 
+fn write_file_in(w: &Workspace, path: &str, text: &str, version: Option<String>) -> R<String> {
+    let full = safe_path(&w.root, path)?;
+    let current = match std::fs::read(&full) {
+        Ok(b) => Some(content_id(&b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(Error::io(path, e).into()),
+    };
+    if current != version {
+        return Err(UiError {
+            kind: "conflict",
+            message: format!("{path} changed on disk since you opened it"),
+        });
+    }
+    if let Some(parent) = full.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| Error::io(parent.display().to_string(), e))?;
+    }
+    let tmp = full.with_extension(format!("kitsu-save-{}", short_id('s')));
+    std::fs::write(&tmp, text).map_err(|e| Error::io(tmp.display().to_string(), e))?;
+    std::fs::rename(&tmp, &full).map_err(|e| Error::io(path, e))?;
+    Ok(content_id(text.as_bytes()))
+}
+
 #[tauri::command]
-pub async fn list_files(state: State<'_, AppState>) -> R<Vec<String>> {
-    let w = ws(&state)?;
-    blocking(move || {
+pub async fn list_files(state: State<'_, AppState>, repo: String) -> R<Vec<String>> {
+    in_repo(&state, repo, move |w| {
         let out = w.git().run([
             "ls-files",
             "--cached",
@@ -763,6 +1003,189 @@ pub async fn list_files(state: State<'_, AppState>) -> R<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch directory, removed on drop.
+    struct Temp(PathBuf);
+
+    impl Temp {
+        fn new(tag: &str) -> Temp {
+            let p = std::env::temp_dir().join(format!("kitsu-app-{tag}-{}", short_id('t')));
+            std::fs::create_dir_all(&p).expect("mkdir");
+            Temp(p)
+        }
+
+        /// A git repository with `.kitsu/` and one commit.
+        fn repo(tag: &str) -> Temp {
+            let t = Temp::new(tag);
+            std::fs::create_dir_all(t.0.join(".kitsu/tasks")).expect("mkdir");
+            std::fs::write(t.0.join(".kitsu/kitsu.toml"), "").expect("write");
+            std::fs::write(
+                t.0.join(".kitsu/tasks/mine.md"),
+                format!("+++\ntitle = \"{tag}'s own\"\n+++\n"),
+            )
+            .expect("write");
+            let git = kitsu::git::Git::new(&t.0);
+            for args in [
+                &["init", "--quiet", "-b", "main"][..],
+                &["add", "-A"],
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "init",
+                ],
+            ] {
+                git.run(args).expect("git");
+            }
+            t
+        }
+    }
+
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn task_ids(ov: &Value) -> Vec<String> {
+        ov["tasks"]
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .map(|t| t["id"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// The only commands without a `repo` argument are the ones about the
+    /// list itself. A new command that touches a repository and forgets
+    /// the argument would have to read some shared "current" one, which is
+    /// exactly what lets a command land in the wrong repository.
+    #[test]
+    fn every_repo_command_names_its_repo() {
+        const LIST_LEVEL: &[&str] = &[
+            "launch_repo",
+            "list_workspaces",
+            "add_workspace",
+            "workspace_overview",
+        ];
+        let src = include_str!("commands.rs");
+        let main = include_str!("main.rs");
+        let mut names = Vec::new();
+        for chunk in src.split(concat!("#[tauri::", "command]")).skip(1) {
+            let at = chunk
+                .find("pub async fn ")
+                .expect("a command is a pub async fn");
+            let sig = &chunk[at + "pub async fn ".len()..];
+            let name = sig.split('(').next().expect("name").to_string();
+            let params = &sig[..sig.find(") -> ").expect("signature")];
+            if LIST_LEVEL.contains(&name.as_str()) {
+                assert!(!params.contains("repo:"), "{name} is list-level");
+            } else {
+                assert!(
+                    params.contains("repo: String"),
+                    "{name} touches a repository, so it must take `repo`"
+                );
+            }
+            assert!(
+                main.contains(&format!("commands::{name},")),
+                "{name} is not registered in main.rs"
+            );
+            names.push(name);
+        }
+        assert!(names.len() >= 30, "{names:?}");
+        for l in LIST_LEVEL {
+            assert!(names.iter().any(|n| n == l), "{l} missing");
+        }
+    }
+
+    #[test]
+    fn a_command_for_one_repo_never_touches_another() {
+        let cfg = Temp::new("cfg");
+        let a = Temp::repo("a");
+        let b = Temp::repo("b");
+        let state = AppState::new(List::new(cfg.0.join(workspaces::FILE)), None);
+        let id_a = add(&state, &a.0.display().to_string(), None)
+            .expect("add a")
+            .id;
+        let id_b = add(&state, &b.0.display().to_string(), Some("Bee"))
+            .expect("add b")
+            .id;
+        assert_ne!(id_a, id_b);
+
+        // Work in B, the way the window's commands do.
+        let wb = state.ws(&id_b).expect("open b");
+        assert_eq!(
+            std::fs::canonicalize(&wb.root).ok(),
+            std::fs::canonicalize(&b.0).ok()
+        );
+        let made = new_entity_in(&wb, "task", "Only in B", &[], &[], &[], &[], None)
+            .expect("new task in b");
+        assert_eq!(made["id"], "only-in-b");
+        write_file_in(&wb, "notes.txt", "b's notes", None).expect("write in b");
+        assert!(b.0.join(".kitsu/tasks/only-in-b.md").exists());
+        assert!(b.0.join("notes.txt").exists());
+        let ov_b = overview_of(&wb).expect("overview b");
+        assert_eq!(ov_b["repo"]["id"], id_b.as_str());
+        assert_eq!(task_ids(&ov_b), ["mine", "only-in-b"]);
+
+        // A was never even opened: no state directory, no files, clean tree.
+        assert!(!a.0.join(".git/kitsu").exists(), "A's git dir untouched");
+        assert!(!a.0.join(".kitsu/tasks/only-in-b.md").exists());
+        assert!(!a.0.join("notes.txt").exists());
+        assert!(kitsu::git::Git::new(&a.0).is_clean().expect("status"));
+        let opened: Vec<String> = state.opened().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(opened, std::slice::from_ref(&id_b));
+
+        // Asking for A gives A, whatever was asked of B before.
+        let wa = state.ws(&id_a).expect("open a");
+        let ov_a = overview_of(&wa).expect("overview a");
+        assert_eq!(ov_a["repo"]["id"], id_a.as_str());
+        assert_eq!(task_ids(&ov_a), ["mine"]);
+
+        // Ids that aren't in the list don't resolve to anything.
+        assert_eq!(
+            state
+                .ws("0123456789ab")
+                .map(|_| ())
+                .expect_err("unknown")
+                .kind,
+            "no_repo"
+        );
+        state.0.list.remove(&id_b).expect("remove b");
+        state.close(&id_b);
+        assert_eq!(
+            state.ws(&id_b).map(|_| ()).expect_err("removed").kind,
+            "no_repo"
+        );
+        assert!(b.0.join("notes.txt").exists(), "removing never deletes");
+    }
+
+    #[test]
+    fn add_wants_a_full_path_and_launch_joins_the_list() {
+        let cfg = Temp::new("cfg");
+        let a = Temp::repo("a");
+        let state = AppState::new(
+            List::new(cfg.0.join(workspaces::FILE)),
+            Some(a.0.join(".kitsu")),
+        );
+        let e = add(&state, "relative/dir", None)
+            .map(|_| ())
+            .expect_err("relative");
+        assert!(e.message.contains("full path"), "{}", e.message);
+        // Started from a folder inside A: A is added, once.
+        let first = launch(&state).expect("launch").expect("a repo");
+        let again = launch(&state).expect("launch").expect("a repo");
+        assert_eq!(first.id, again.id);
+        assert_eq!(state.0.list.load().expect("list").len(), 1);
+        let dup = add(&state, &a.0.display().to_string(), None)
+            .map(|_| ())
+            .expect_err("dup");
+        assert_eq!(dup.kind, "conflict");
+    }
 
     #[test]
     fn safe_path_refuses_escapes() {
