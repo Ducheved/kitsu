@@ -954,7 +954,9 @@ impl<'a> Host<'a> {
                 crate::agents::agent_env(self.spec, std::env::vars())
                     .into_iter()
                     .filter(|(k, _)| {
-                        Some(k) != self.native.api_key_env.as_ref() && Some(k.as_str()) != judge_key
+                        let named =
+                            |v: Option<&str>| v.is_some_and(|v| crate::agents::same_env_name(k, v));
+                        !named(self.native.api_key_env.as_deref()) && !named(judge_key)
                     }),
             )
             .env("KITSU_RUN", &self.run)
