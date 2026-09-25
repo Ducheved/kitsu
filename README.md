@@ -317,6 +317,13 @@ guards = ["payments.py"]                                            # any change
 why = "One idempotency key per logical charge, reused by every retry."
 ```
 
+A check's `run` is a POSIX `sh -c` command on every platform, and so is the
+native loop's `shell` tool. On Windows that's the `sh.exe` from Git for
+Windows (found on PATH or next to `git`), or the one `KITSU_SH` names.
+Without one, checks are recorded as `error`, never as passing: Kitsu does
+not fall back to `cmd.exe`, which would read `echo ok; exit 1` as a
+command that succeeds (decision `sh-everywhere`).
+
 This repository uses Kitsu on itself; see [`.kitsu/`](.kitsu) for its own
 checks, decisions and what's next.
 
@@ -360,7 +367,7 @@ Verified here means an automated test or a measurement in this repo does it.
 | Hooks for Claude Code, Codex and Cursor; `kitsu diff`, `kitsu ci` | unit tests against the vendors' documented hook JSON, 4 end-to-end tests through the binary; **not run inside a real Claude, Codex or Cursor session, and the action hasn't run on GitHub** |
 | **Real agents** (Claude, Codex, Gemini adapters) | **partly**: Claude Code through `kitsu run` against a stub model (compaction probe) |
 | **How good it is on real tasks**, own loop vs Codex vs OpenCode | **not measured yet**; an eval suite with held-out checks is in progress ([roadmap](docs/roadmap.md)) |
-| **macOS and Windows** | **not built or run yet**. Stop on Windows falls back to a 1 s poll; orphan cleanup is Linux-only |
+| **macOS and Windows** | **the CLI's test suite runs on both in CI; the app is not built there yet**. On Windows: checks need Git for Windows' `sh`; stop falls back to a 1 s poll; a stopped command's tree is killed with `taskkill /T`, but what it left running after its shell exited is not; orphan cleanup after a crash is Linux-only |
 | **Sandboxing** | **none**. Worktrees isolate changes, not processes. Agents run with your permissions |
 
 ## Docs

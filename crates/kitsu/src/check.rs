@@ -94,21 +94,16 @@ struct Ran {
     log: Vec<u8>,
 }
 
-fn shell(run: &str) -> Command {
-    #[cfg(windows)]
-    {
-        let mut c = Command::new("cmd");
-        c.args(["/C", &format!("{run} 2>&1")]);
-        c
-    }
-    #[cfg(not(windows))]
-    {
-        let mut c = Command::new("sh");
-        // `exec 2>&1` first so every command in a compound `run` interleaves
-        // stderr with stdout in the order it was written.
-        c.args(["-c", &format!("exec 2>&1\n{run}")]);
-        c
-    }
+/// `sh -c` everywhere, Git for Windows' sh on Windows (`proc::sh`): check
+/// commands are written in POSIX shell, and `cmd.exe` would pass some of
+/// them (`echo ok; exit 1` is one echo to it). No shell is an error.
+fn shell(run: &str) -> Result<Command> {
+    let sh = crate::proc::sh().map_err(Error::Invalid)?;
+    let mut c = Command::new(sh);
+    // `exec 2>&1` first so every command in a compound `run` interleaves
+    // stderr with stdout in the order it was written.
+    c.args(["-c", &format!("exec 2>&1\n{run}")]);
+    Ok(c)
 }
 
 /// Where a held-out check's files are: `$KITSU_HELD_OUT_DIR/<check>`, else
@@ -135,7 +130,7 @@ fn run_command(
     check: &CheckDef,
     held_out: Option<&Path>,
 ) -> Result<Ran> {
-    let mut cmd = shell(run);
+    let mut cmd = shell(run)?;
     if let Some(d) = held_out {
         cmd.env("KITSU_HELD_OUT", d);
     }
@@ -204,7 +199,7 @@ fn run_command(
     let outcome = if timed_out {
         log.extend_from_slice(
             format!(
-                "\nkitsu: timed out after {}s, process group killed\n",
+                "\nkitsu: timed out after {}s, process tree killed\n",
                 timeout.as_secs()
             )
             .as_bytes(),
@@ -223,13 +218,7 @@ fn run_command(
 }
 
 fn kill_group(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        let pgid = child.id().to_string();
-        let _ = Command::new("kill")
-            .args(["-KILL", "--", &format!("-{pgid}")])
-            .status();
-    }
+    crate::proc::kill_tree_blocking(child.id());
     let _ = child.kill();
 }
 
@@ -522,6 +511,22 @@ mod tests {
         assert_eq!(
             cr.execute(&check("exit 3", &[])).expect("fail").exit_code,
             Some(3)
+        );
+        // POSIX shell on every platform: under cmd.exe this is one echo
+        // that exits 0.
+        assert_eq!(
+            cr.execute(&check("echo ok; exit 1", &[]))
+                .expect("fail")
+                .outcome,
+            CheckOutcome::Fail
+        );
+        // A program that isn't there is a failure, not a pass.
+        let missing = cr
+            .execute(&check("kitsu-no-such-program --version", &[]))
+            .expect("missing");
+        assert_eq!(
+            (missing.outcome, missing.exit_code),
+            (CheckOutcome::Fail, Some(127))
         );
         let mut slow = check("sleep 30", &[]);
         slow.timeout_secs = 1;

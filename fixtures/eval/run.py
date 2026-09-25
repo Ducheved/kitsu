@@ -63,7 +63,11 @@ AGENTS = ("kitsu-native", "opencode", "codex")
 # agents reach the network the way this shell does.
 PASS_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
             "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-            "TMPDIR")
+            "TMPDIR",
+            # Windows: without these a child can't start (SystemRoot) or find
+            # programs by extension (PATHEXT). Absent elsewhere.
+            "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
+EXE = ".exe" if os.name == "nt" else ""
 # Strings that mean an agent went looking for the answers.
 PEEK_MARKERS = ("heldout", "dryrun", "fixtures/eval", HERE)
 
@@ -175,7 +179,7 @@ class FakeKeyServer:
         n = 0
         logs = os.path.join(self.work, "requests")
         for name in os.listdir(logs) if os.path.isdir(logs) else []:
-            with open(os.path.join(logs, name)) as f:
+            with open(os.path.join(logs, name), encoding="utf-8") as f:
                 n += sum(1 for _ in f)
         return round(n * self.PER_REQUEST, 6)
 
@@ -232,7 +236,7 @@ class RecordingProxy:
                           "items": len(req.get("messages") or req.get("input") or [])})
         with self.lock:
             if self.log_path:
-                with open(self.log_path, "a") as f:
+                with open(self.log_path, "a", encoding="utf-8", newline="\n") as f:
                     f.write(json.dumps(entry) + "\n")
 
     def forward(self, h, body):
@@ -279,7 +283,7 @@ def summarize_requests(path):
     """What the agent actually sent, from the proxy's log of one run."""
     rows = []
     if os.path.exists(path):  # no file: the agent never called the model
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             rows = [json.loads(line) for line in f if line.strip()]
     calls = [r for r in rows if r["method"] == "POST" and r["path"].endswith(("/chat/completions", "/responses"))]
     return {
@@ -347,8 +351,8 @@ def variant_files(task, variant):
     for dp, _, fs in os.walk(root):
         for f in fs:
             p = os.path.join(dp, f)
-            with open(p) as fh:
-                out[os.path.relpath(p, root)] = fh.read()
+            with open(p, encoding="utf-8") as fh:
+                out[os.path.relpath(p, root).replace(os.sep, "/")] = fh.read()
     return dict(sorted(out.items()))
 
 
@@ -372,7 +376,7 @@ def heldout(task, tree, env):
               if os.path.basename(rel).startswith("test_") and rel.endswith(".py")]
     try:
         r = subprocess.run([sys.executable, "-I", HELDOUT_RUNNER, *tests], cwd=tree, env=env,
-                           capture_output=True, text=True, timeout=300)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
     except subprocess.TimeoutExpired:
         return {"ran": 0, "failed": [{"test": "*", "error": "timed out after 300 s"}], "ok": False}
     lines = [line for line in r.stdout.splitlines() if line.startswith("{")]
@@ -409,7 +413,7 @@ def check_fixtures(tasks):
                 if variant != "base":
                     for rel, content in variant_files(t, variant).items():
                         os.makedirs(os.path.dirname(os.path.join(tree, rel)) or tree, exist_ok=True)
-                        with open(os.path.join(tree, rel), "w") as f:
+                        with open(os.path.join(tree, rel), "w", encoding="utf-8", newline="\n") as f:
                             f.write(content)
                 visible = {}
                 for name, c in t["checks"].items():
@@ -505,7 +509,7 @@ class Suite:
             self.secret = Secret(DRY_KEY)
             self.fake = FakeKeyServer(self.work)
             self.meter = Meter(self.fake.url, self.secret, poll=0.1, settle_min=0, settle_max=2)
-            self.test_agent = args.test_agent or os.path.join(os.path.dirname(self.kitsu_bin), "kitsu-test-agent")
+            self.test_agent = args.test_agent or os.path.join(os.path.dirname(self.kitsu_bin), "kitsu-test-agent" + EXE)
             self.scripts = dict(kv.split("=", 1) for kv in args.dry_script.split(","))
             self.reserve = args.run_reserve_usd if args.run_reserve_usd is not None else 0.001
         else:
@@ -595,7 +599,7 @@ class Suite:
         model_opts = {"options": {"reasoning": {"effort": self.effort}}} if self.effort else {}
         d = os.path.join(self.work, "opencode")
         os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, "opencode.json"), "w") as f:
+        with open(os.path.join(d, "opencode.json"), "w", encoding="utf-8", newline="\n") as f:
             json.dump({
                 "$schema": "https://opencode.ai/config.json",
                 "model": f"openrouter/{m}",
@@ -608,7 +612,7 @@ class Suite:
             }, f, indent=2)
         ch = os.path.join(self.work, "codex-home")
         os.makedirs(ch, exist_ok=True)
-        with open(os.path.join(ch, "config.toml"), "w") as f:
+        with open(os.path.join(ch, "config.toml"), "w", encoding="utf-8", newline="\n") as f:
             effort = f'model_reasoning_effort = {json.dumps(self.effort)}\n' if self.effort else ""
             f.write(f'model = {json.dumps(m)}\nmodel_provider = "openrouter"\nweb_search = "disabled"\n{effort}\n'
                     '[model_providers.openrouter]\nname = "openrouter"\n'
@@ -627,7 +631,7 @@ class Suite:
                       for p, c in files.items()]
             steps.append({"tool": "finish", "args": {"outcome": outcome, "summary": summary},
                           "usage": {"input": 4000, "output": 60}})
-            with open(os.path.join(base, "script.json"), "w") as f:
+            with open(os.path.join(base, "script.json"), "w", encoding="utf-8", newline="\n") as f:
                 json.dump(steps, f)
         else:
             q = lambda s: json.dumps(s, ensure_ascii=False)
@@ -635,7 +639,7 @@ class Suite:
             for p, c in files.items():
                 out += ["", "[[steps]]", f"write = {{ path = {q(p)}, content = {q(c)} }}"]
             out += ["", "[[steps]]", f"say = {q(summary)}"]
-            with open(os.path.join(base, "agent-script.toml"), "w") as f:
+            with open(os.path.join(base, "agent-script.toml"), "w", encoding="utf-8", newline="\n") as f:
                 f.write("\n".join(out) + "\n")
 
     def kitsu_env(self, cfg):
@@ -644,7 +648,8 @@ class Suite:
         return env
 
     def kcmd(self, *args, env, cwd, timeout=120):
-        return subprocess.run([self.kitsu_bin, *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run([self.kitsu_bin, *args], cwd=cwd, env=env, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=timeout)
 
     # ---- one run
 
@@ -670,7 +675,7 @@ class Suite:
                 shutil.rmtree(base, ignore_errors=True)
 
     def drive(self, n, trial, task, agent, base, repo, cfg, stub):
-        with open(os.path.join(cfg, "agents.toml"), "w") as f:
+        with open(os.path.join(cfg, "agents.toml"), "w", encoding="utf-8", newline="\n") as f:
             f.write(self.agents_toml(agent, task, base))
         env = self.kitsu_env(cfg)
         self.kcmd("trust", env=env, cwd=repo)
@@ -695,7 +700,7 @@ class Suite:
         out_p, err_p = os.path.join(base, "run.out"), os.path.join(base, "run.err")
         harness_stop = None
         t0 = time.monotonic()
-        with open(out_p, "w") as fo, open(err_p, "w") as fe:
+        with open(out_p, "wb") as fo, open(err_p, "wb") as fe:
             p = subprocess.Popen([self.kitsu_bin, "run", task["task"], "--agent", agent, "--policy", "auto",
                                   "--id", RUN_ID, "-q", "--json"],
                                  cwd=repo, env=env, stdout=fo, stderr=fe, start_new_session=True)
@@ -707,7 +712,10 @@ class Suite:
                     try:
                         p.wait(timeout=20)
                     except subprocess.TimeoutExpired:
-                        os.killpg(p.pid, signal.SIGKILL)
+                        if hasattr(os, "killpg"):
+                            os.killpg(p.pid, signal.SIGKILL)
+                        else:  # Windows: no process groups; the tree goes with taskkill
+                            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
                         p.wait()
         wall_s = round(time.monotonic() - t0, 1)
         if stub:
@@ -744,9 +752,10 @@ class Suite:
         self.records.append(rec)
         self.write_line(rec)
         for src, name in ((out_p, f"{n}.out"), (err_p, f"{n}.err")):
-            with open(src, errors="replace") as f, open(os.path.join(self.out, "logs", name), "w") as g:
+            with open(src, encoding="utf-8", errors="replace") as f, \
+                    open(os.path.join(self.out, "logs", name), "w", encoding="utf-8", newline="\n") as g:
                 g.write(redact(f.read(), self.secret))
-        with open(os.path.join(self.out, "logs", f"{n}.events.json"), "w") as g:
+        with open(os.path.join(self.out, "logs", f"{n}.events.json"), "w", encoding="utf-8", newline="\n") as g:
             g.write(redact(json.dumps(events, indent=1), self.secret))
         if harness_stop in ("budget", "usage_unknown"):
             raise Stop(f"run {n} stopped: {harness_stop}")
@@ -854,7 +863,7 @@ class Suite:
         }
 
     def write_line(self, obj):
-        with open(os.path.join(self.out, "runs.jsonl"), "a") as f:
+        with open(os.path.join(self.out, "runs.jsonl"), "a", encoding="utf-8", newline="\n") as f:
             f.write(redact(json.dumps(obj), self.secret) + "\n")
 
     # ---- the whole suite
@@ -996,7 +1005,7 @@ class Suite:
                   "on the task whose right outcome is blocked; in parentheses, how many of those Kitsu's visible "
                   "checks passed. *Cost* is the change in the key's OpenRouter usage around the run; tokens and "
                   "the agent's own cost report are in runs.jsonl.", ""]
-        with open(os.path.join(self.out, "summary.md"), "w") as f:
+        with open(os.path.join(self.out, "summary.md"), "w", encoding="utf-8", newline="\n") as f:
             f.write(redact("\n".join(lines), self.secret))
 
 
@@ -1004,7 +1013,8 @@ def start_stub(base, log_path):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     p = subprocess.Popen([sys.executable, STUB, "--port", "0", "--log", log_path,
                           "--script", os.path.join(base, "script.json")],
-                         stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
+                         stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True, encoding="utf-8",
+                         errors="replace")
     line = p.stderr.readline()
     m = re.search(r":(\d+)\s*$", line)
     if not m:
@@ -1018,7 +1028,7 @@ def find_kitsu():
     if env:
         return env
     for prof in ("release", "debug"):
-        p = os.path.join(ROOT, "target", prof, "kitsu")
+        p = os.path.join(ROOT, "target", prof, "kitsu" + EXE)
         if os.path.exists(p):
             return p
     p = shutil.which("kitsu")
@@ -1063,6 +1073,10 @@ def main(argv=None):
     ap.add_argument("--suggest-models", action="store_true")
     ap.add_argument("--filter", help="--suggest-models: only ids matching this regex")
     args = ap.parse_args(argv)
+    # Windows' console and pipes default to a legacy code page, which can't
+    # print ✓; everything this writes is UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", errors="replace")
     # The stub, the proxy and the dry-run key endpoint are on this machine.
     for k in ("NO_PROXY", "no_proxy"):
         os.environ[k] = ",".join(p for p in [os.environ.get(k, ""), "127.0.0.1", "localhost"] if p)

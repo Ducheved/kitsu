@@ -1547,6 +1547,10 @@ mod tests {
         let srv = Server::start(vec![]);
         let mut cfg = srv.config();
         cfg.base_url = format!("http://127.0.0.1:{port}");
+        // Windows retries a refused SYN for about two seconds before it says
+        // "refused" (os error 10061); a shorter timeout would call that a
+        // timeout, which isn't what this is about.
+        cfg.timeout_ms = 10_000;
         let st = store();
         let j = rt().block_on(
             srv.judge(cfg)

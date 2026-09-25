@@ -49,7 +49,9 @@ pub fn check(intent: &Intent, files: &[String]) -> Report {
     };
     let has_model = !els.is_empty() || !intent.config.architecture_cover.is_everything();
     for p in &intent.problems {
-        if p.path.starts_with(".kitsu/architecture/") {
+        // `[architecture] cover` lives in kitsu.toml: unread, what must be
+        // covered is unknown, and "0 covered files" would be a pass.
+        if p.path.starts_with(".kitsu/architecture/") || p.path == crate::intent::CONFIG {
             r.errors.push(format!("{}: {}", p.path, p.detail));
         }
     }
@@ -258,6 +260,30 @@ mod tests {
         );
         // No model at all is not an error: the repository doesn't use this.
         assert!(check(&Intent::default(), &tree(&[])).ok());
+    }
+
+    #[test]
+    fn an_unreadable_config_is_not_a_model_that_covers_nothing() {
+        // A Windows path in a TOML basic string: `\a` is no escape.
+        let i = Intent::from_files(vec![
+            (
+                ".kitsu/kitsu.toml".into(),
+                b"[architecture]\ncover = [\"src/*.rs\"]\n[checks.a]\nrun = \"C:\\a\\kitsu.exe arch check\"\n".to_vec(),
+            ),
+            (
+                ".kitsu/architecture/sys.md".into(),
+                b"+++\nlevel = \"system\"\n+++\n".to_vec(),
+            ),
+        ]);
+        let r = check(&i, &tree(&[]));
+        assert!(!r.ok());
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.starts_with(".kitsu/kitsu.toml: ")),
+            "{:?}",
+            r.errors
+        );
     }
 
     #[test]

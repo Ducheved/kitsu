@@ -1222,6 +1222,10 @@ fn run(ws: &Workspace, opts: Options, quiet: bool, json: bool) -> Result<std::pr
         !quiet && !json,
         &mut wake,
     ));
+    // Nothing async is left. On Windows the runtime reads child pipes on
+    // blocking threads, and dropping it waits for them: a process the agent
+    // left running would hold `kitsu run` open until it exits.
+    rt.shutdown_background();
     // Whatever went wrong after the run row exists goes into the run, so
     // it never sits in "starting" with the reason only on a closed stderr.
     let state = match driven {

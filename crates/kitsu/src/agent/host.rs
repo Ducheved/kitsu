@@ -943,8 +943,13 @@ impl<'a> Host<'a> {
         wake: &mut Wake,
     ) -> std::result::Result<String, Failure> {
         let limits = crate::agents::limits().map_err(|e| Failure::Failed(e.to_string()))?;
+        let sh = crate::proc::sh().map_err(Failure::Failed)?;
         let (argv, _) = crate::agents::limited(
-            &["sh".to_string(), "-c".to_string(), command.to_string()],
+            &[
+                sh.to_string_lossy().into_owned(),
+                "-c".to_string(),
+                command.to_string(),
+            ],
             limits,
             &crate::agents::allowed_cpus(),
             crate::agents::on_path,
@@ -958,7 +963,9 @@ impl<'a> Host<'a> {
                 crate::agents::agent_env(self.spec, std::env::vars())
                     .into_iter()
                     .filter(|(k, _)| {
-                        Some(k) != self.native.api_key_env.as_ref() && Some(k.as_str()) != judge_key
+                        let named =
+                            |v: Option<&str>| v.is_some_and(|v| crate::agents::same_env_name(k, v));
+                        !named(self.native.api_key_env.as_deref()) && !named(judge_key)
                     }),
             )
             .env("KITSU_RUN", &self.run)
@@ -1285,8 +1292,30 @@ fn screen(command: &str, worktree: &Path, paths: bool) -> Option<&'static str> {
         .filter(|w| !w.is_empty())
         .collect();
     let wt = worktree.to_string_lossy();
+    // On Windows a command can spell a path `C:\x`, `C:/x` or `\\host\x`,
+    // and name `curl.exe`.
+    let seps: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+    let win_abs = |w: &str| {
+        cfg!(windows)
+            && (w.starts_with('\\')
+                || (w.len() >= 3
+                    && w.as_bytes()[0].is_ascii_alphabetic()
+                    && w.as_bytes()[1] == b':'
+                    && matches!(w.as_bytes()[2], b'/' | b'\\')))
+    };
+    let win_wt = cfg!(windows).then(|| wt.replace('\\', "/").to_ascii_lowercase());
     for (i, w) in words.iter().enumerate() {
-        let prog = w.rsplit('/').next().unwrap_or(w);
+        let prog = w.rsplit(seps).next().unwrap_or(w);
+        let prog = match prog.len().checked_sub(4) {
+            Some(n)
+                if cfg!(windows)
+                    && prog.is_char_boundary(n)
+                    && prog[n..].eq_ignore_ascii_case(".exe") =>
+            {
+                &prog[..n]
+            }
+            _ => prog,
+        };
         let next = words.get(i + 1).copied().unwrap_or("");
         if NETWORK.contains(&prog) {
             return Some("uses the network");
@@ -1304,20 +1333,37 @@ fn screen(command: &str, worktree: &Path, paths: bool) -> Option<&'static str> {
         // comes after it.
         let inside = if *w == wt {
             Some("")
+        } else if let Some(win) = &win_wt {
+            // Windows: either separator, any case.
+            let lw = w.replace('\\', "/").to_ascii_lowercase();
+            if lw == *win {
+                Some("")
+            } else {
+                lw.strip_prefix(win.as_str())
+                    .and_then(|r| r.strip_prefix('/'))
+                    .map(|r| &w[w.len() - r.len()..])
+            }
         } else {
             w.strip_prefix(wt.as_ref())
-                .and_then(|r| r.strip_prefix('/'))
+                .and_then(|r| r.strip_prefix(seps))
         };
         let rel = inside.unwrap_or(w);
-        if paths && rel.split('/').any(|c| c == "..") {
+        if paths
+            && rel
+                .split(seps)
+                .any(|c| c == ".." || (cfg!(windows) && c.trim_end() == ".."))
+        {
             return Some("names a path outside the worktree");
         }
-        if rel.split('/').any(|c| c == ".git") {
+        if rel.split(seps).any(|c| {
+            c == ".git"
+                || (cfg!(windows) && c.trim_end_matches([' ', '.']).eq_ignore_ascii_case(".git"))
+        }) {
             return Some("touches the git directory");
         }
         if paths
             && inside.is_none()
-            && w.starts_with('/')
+            && (w.starts_with('/') || win_abs(w))
             && !matches!(*w, "/dev/null" | "/dev/stdout" | "/dev/stderr")
         {
             return Some("names a path outside the worktree");
@@ -1451,14 +1497,13 @@ enum Stop {
 }
 
 /// Kill what is left of a process group whose leader was already reaped.
+/// Unix only: on Windows the leader's number may already belong to another
+/// process, and what it started can't be found from it; what is left there
+/// keeps running, but its output is no longer read.
 async fn kill_group(group: Option<u32>) {
     #[cfg(unix)]
     if let Some(pid) = group {
-        let _ = tokio::process::Command::new("kill")
-            .args(["-KILL", "--", &format!("-{pid}")])
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        crate::proc::kill_tree(pid).await;
     }
     #[cfg(not(unix))]
     let _ = group;
@@ -1855,5 +1900,30 @@ mod tests {
             screen("ln -s /tmp out", wt, true),
             Some("names a path outside the worktree")
         );
+        if cfg!(windows) {
+            // How a command spells things there.
+            let wt = Path::new(r"C:\repo\.git\kitsu\worktrees\r1");
+            for (cmd, why) in [
+                ("curl.exe https://example.com", "uses the network"),
+                (r"C:\Windows\System32\curl.EXE x", "uses the network"),
+                (
+                    r"cat C:\Users\me\.ssh\id_rsa",
+                    "names a path outside the worktree",
+                ),
+                ("cat D:/secrets.env", "names a path outside the worktree"),
+                (r"cat \\host\share\x", "names a path outside the worktree"),
+                (r"cat src\..\..\x", "names a path outside the worktree"),
+                (r"rm -rf .GIT\hooks", "touches the git directory"),
+            ] {
+                assert_eq!(screen(cmd, wt, true), Some(why), "{cmd}");
+            }
+            for cmd in [
+                r"ls c:\REPO\.git\kitsu\worktrees\r1\src",
+                "ls C:/repo/.git/kitsu/worktrees/r1/src",
+                r"cat src\lib.rs",
+            ] {
+                assert_eq!(screen(cmd, wt, true), None, "{cmd}");
+            }
+        }
     }
 }

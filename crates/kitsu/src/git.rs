@@ -128,7 +128,7 @@ impl Git {
     }
 
     pub fn toplevel(&self) -> Result<PathBuf> {
-        Ok(PathBuf::from(
+        Ok(native_path(
             self.run(["rev-parse", "--show-toplevel"])?.trim(),
         ))
     }
@@ -136,7 +136,7 @@ impl Git {
     /// The directory shared by all worktrees of this repository.
     pub fn common_dir(&self) -> Result<PathBuf> {
         let raw = self.run(["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
-        Ok(PathBuf::from(raw.trim()))
+        Ok(native_path(raw.trim()))
     }
 
     pub fn head(&self) -> Result<Option<String>> {
@@ -206,7 +206,7 @@ impl Git {
     /// so the user's staging area is never touched. Cost is one stat per
     /// tracked file plus hashing of whatever changed.
     pub fn worktree_tree(&self, scratch_dir: &Path) -> Result<String> {
-        let git_dir = PathBuf::from(
+        let git_dir = native_path(
             self.run(["rev-parse", "--path-format=absolute", "--git-dir"])?
                 .trim(),
         );
@@ -426,7 +426,7 @@ impl Git {
         Ok(out
             .split('\0')
             .filter_map(|l| l.strip_prefix("worktree "))
-            .map(PathBuf::from)
+            .map(native_path)
             .collect())
     }
 
@@ -713,6 +713,17 @@ pub struct WorktreeInfo {
     pub prunable: bool,
 }
 
+/// A path git printed, in this platform's separators. Git for Windows
+/// prints `C:/x/y`; joining onto that gives `C:/x/y\z`, which works but is
+/// what every message would then show.
+pub fn native_path(git_path: &str) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(git_path.replace('/', "\\"))
+    } else {
+        PathBuf::from(git_path)
+    }
+}
+
 fn parse_worktrees(out: &str) -> Vec<WorktreeInfo> {
     let mut all = Vec::new();
     let mut cur: Option<WorktreeInfo> = None;
@@ -721,7 +732,7 @@ fn parse_worktrees(out: &str) -> Vec<WorktreeInfo> {
         if let Some(p) = line.strip_prefix("worktree ") {
             all.extend(cur.take());
             cur = Some(WorktreeInfo {
-                path: PathBuf::from(p),
+                path: native_path(p),
                 head: None,
                 branch: None,
                 bare: false,

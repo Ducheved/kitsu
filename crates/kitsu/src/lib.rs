@@ -21,6 +21,7 @@ pub mod intent;
 pub mod judge;
 pub mod mcp;
 pub mod memory;
+pub mod proc;
 pub mod recover;
 pub mod run;
 pub mod runner;

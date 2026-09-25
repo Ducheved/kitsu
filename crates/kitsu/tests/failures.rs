@@ -437,6 +437,8 @@ fn killing_the_run_process_leaves_an_honest_interrupted_run() {
             .map(|r| r.state == RunState::Running && r.pid.is_some())
             .unwrap_or(false)
     });
+    // Orphan cleanup is Linux-only (README), so only Linux looks at it.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     let agent_pid = env.store().run("rkill").expect("run").pid.expect("pid");
     // Give the agent a moment to write its file.
     std::thread::sleep(Duration::from_millis(300));
@@ -673,6 +675,32 @@ fn untrusted_repositories_do_not_run_anything() {
 }
 
 #[test]
+fn a_check_with_no_shell_to_run_it_is_an_error_never_a_pass() {
+    let env = Env::new("nosh");
+    let o = env
+        .cmd(&["--json", "check"])
+        .env("KITSU_SH", env.root.join("no-such-sh"))
+        .output()
+        .expect("check");
+    assert_eq!(o.status.code(), Some(2), "not all pass");
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&o.stdout).expect("json");
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows.iter().all(|r| r["outcome"] == "error"), "{rows:?}");
+    let log = Workspace::discover(&env.repo)
+        .expect("ws")
+        .blobs()
+        .get(rows[0]["log"].as_str().expect("log"))
+        .expect("blob");
+    assert!(
+        String::from_utf8_lossy(&log).contains("KITSU_SH is"),
+        "{}",
+        String::from_utf8_lossy(&log)
+    );
+    let show = env.ok(&["show", "bounded-retries"]);
+    assert!(!show.contains("pass"), "{show}");
+}
+
+#[test]
 fn a_broken_rule_file_blocks_accept_and_is_loud_in_the_brief() {
     let env = Env::new("broken");
     env.run_with(&agent("good"), "rgood", &[]);
@@ -824,10 +852,15 @@ fn memory_goes_stale_with_its_code_and_reaches_the_brief() {
         "--body",
         "From their API docs, section Idempotency.",
     ]);
+    // The path it wrote, in this platform's separators.
     assert!(
-        path.trim()
+        Path::new(path.trim())
             .ends_with(".kitsu/memory/upstream-dedupes-idempotency-keys-for-24-hours.md"),
         "{path}"
+    );
+    assert!(
+        !(path.contains('/') && path.contains('\\')),
+        "one kind of separator: {path}"
     );
     git(&env.repo, &["add", "-A"]);
     git(&env.repo, &["commit", "-qm", "remember dedupe"]);
@@ -1015,9 +1048,11 @@ fn a_module_outside_the_architecture_model_fails_its_check() {
     }
     let config = env.repo.join(".kitsu/kitsu.toml");
     let mut toml = std::fs::read_to_string(&config).expect("config");
-    // Required for every change to a module or to the model.
+    // Required for every change to a module or to the model. The binary's
+    // path goes into TOML and then to sh: `C:\...` is neither's escapes.
+    let kitsu = KITSU.replace('\\', "/");
     toml.push_str(&format!(
-        "\n[architecture]\ncover = [\"*.py\"]\n\n[checks.architecture]\nrun = \"{KITSU} arch check\"\ntimeout = \"1m\"\nguards = [\"*.py\", \".kitsu/architecture/**\"]\n"
+        "\n[architecture]\ncover = [\"*.py\"]\n\n[checks.architecture]\nrun = \"'{kitsu}' arch check\"\ntimeout = \"1m\"\nguards = [\"*.py\", \".kitsu/architecture/**\"]\n"
     ));
     std::fs::write(&config, toml).expect("config");
     git(&env.repo, &["add", "-A"]);

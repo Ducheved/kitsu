@@ -234,12 +234,30 @@ pub fn agent_env(
     parent: impl IntoIterator<Item = (String, String)>,
 ) -> Vec<(String, String)> {
     let allowed = |k: &str| {
-        BASE_ENV.contains(&k) || k.starts_with("LC_") || spec.pass_env.iter().any(|p| p == k)
+        BASE_ENV.iter().any(|b| same_env_name(b, k))
+            || k.starts_with("LC_")
+            || spec.pass_env.iter().any(|p| same_env_name(p, k))
     };
     let mut out: BTreeMap<String, String> =
         parent.into_iter().filter(|(k, _)| allowed(k)).collect();
-    out.extend(spec.env.clone());
+    for (k, v) in &spec.env {
+        // On Windows `Path` and `PATH` are one variable: the agent's own
+        // value replaces the inherited one instead of racing it.
+        out.retain(|have, _| !same_env_name(have, k));
+        out.insert(k.clone(), v.clone());
+    }
     out.into_iter().collect()
+}
+
+/// Whether two environment variable names are the same variable: exactly
+/// on Unix, ignoring ASCII case on Windows, where the environment keeps
+/// `PATH` as `Path`.
+pub fn same_env_name(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
 }
 
 /// `_meta` for presets that understand it.
@@ -675,6 +693,36 @@ mod tests {
         let custom =
             with_config("[agents.mine]\ncommand = [\"x\"]\nmeta = { mode = \"fast\", n = 2 }\n");
         assert_eq!(custom["mine"].meta, Some(json!({ "mode": "fast", "n": 2 })));
+    }
+
+    #[test]
+    fn variable_names_are_matched_the_way_the_platform_does() {
+        let presets = with_config("[agents.mine]\ncommand = [\"x\"]\nenv = { PATH = \"/mine\" }\n");
+        let parent = || {
+            [
+                ("Path", "/bin"),
+                ("Github_Token", "t"),
+                ("SystemRoot", "C:\\Windows"),
+            ]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+        };
+        let got = agent_env(&presets["codex"], parent());
+        let names: Vec<&str> = got.iter().map(|(k, _)| k.as_str()).collect();
+        if cfg!(windows) {
+            // The environment spells it `Path`; without it nothing is found.
+            assert_eq!(names, ["Path", "SystemRoot"]);
+        } else {
+            assert_eq!(names, ["SystemRoot"], "`Path` is not `PATH` here");
+        }
+        // The agent's own value replaces the inherited one, whatever its case.
+        let got = agent_env(&presets["mine"], parent());
+        let paths: Vec<&(String, String)> = got
+            .iter()
+            .filter(|(k, _)| same_env_name(k, "PATH"))
+            .collect();
+        assert_eq!(paths, [&("PATH".to_string(), "/mine".to_string())]);
+        assert!(same_env_name("PATH", "PATH"));
+        assert_eq!(same_env_name("PATH", "Path"), cfg!(windows));
     }
 
     #[test]

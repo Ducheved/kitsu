@@ -246,8 +246,14 @@ pub fn confine(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let p = Path::new(rel);
     for c in p.components() {
         match c {
-            Component::Normal(s) if s == ".git" => {
+            Component::Normal(s) if is_git_dir_name(&s.to_string_lossy()) => {
                 return Err(format!("`{rel}`: .git is not yours to touch"));
+            }
+            // Windows reads `.. ` as `..`.
+            Component::Normal(s) if cfg!(windows) && s.to_string_lossy().trim_end() == ".." => {
+                return Err(format!(
+                    "`{rel}`: use a path relative to the repository, without `..`"
+                ));
             }
             Component::Normal(_) | Component::CurDir => {}
             _ => {
@@ -278,11 +284,28 @@ pub fn confine(root: &Path, rel: &str) -> Result<PathBuf, String> {
     if !real.starts_with(&root) {
         return Err(format!("`{rel}` resolves outside your worktree"));
     }
+    // What the name resolved to, in case the file system reads `.GIT` or
+    // `.git.` as `.git` (macOS, Windows).
+    if real
+        .strip_prefix(&root)
+        .ok()
+        .and_then(|r| r.components().next())
+        .is_some_and(|c| is_git_dir_name(&c.as_os_str().to_string_lossy()))
+    {
+        return Err(format!("`{rel}`: .git is not yours to touch"));
+    }
     let mut out = real;
     for n in rest.into_iter().rev() {
         out.push(n);
     }
     Ok(out)
+}
+
+/// `.git`, as a case-insensitive file system may also spell it (`.GIT`),
+/// and as Windows does (`.git.`, `.git `, trailing dots and spaces dropped).
+fn is_git_dir_name(name: &str) -> bool {
+    name.trim_end_matches([' ', '.'])
+        .eq_ignore_ascii_case(".git")
 }
 
 /// Replace `old` with `new` in `text`. Line endings: if the file uses CRLF
@@ -531,19 +554,39 @@ mod tests {
             confine(&root, "./new/dir/b.rs").expect("should work"),
             real.join("new/dir/b.rs")
         );
-        for bad in ["../x", "/etc/passwd", ".git/config", "src/../../x", ""] {
+        for bad in [
+            "../x",
+            "/etc/passwd",
+            ".git/config",
+            ".GIT/config",
+            ".git./config",
+            "src/../../x",
+            "",
+        ] {
             assert!(confine(&root, bad).is_err(), "{bad}");
         }
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink("/tmp", root.join("out")).expect("symlink");
-            assert!(
-                confine(&root, "out/x")
-                    .expect_err("should fail")
-                    .contains("outside")
-            );
+        if cfg!(windows) {
+            for bad in [
+                r"C:\x",
+                r"C:x",
+                r"\x",
+                r"\\host\share\x",
+                r"src\..\..\x",
+                r".. \x",
+            ] {
+                assert!(confine(&root, bad).is_err(), "{bad}");
+            }
         }
+        let away = std::env::temp_dir().join(format!("kitsu-confine-away-{}", std::process::id()));
+        std::fs::create_dir_all(&away).expect("mkdir");
+        crate::util::link_dir(&away, &root.join("out"));
+        assert!(
+            confine(&root, "out/x")
+                .expect_err("should fail")
+                .contains("outside")
+        );
         let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&away);
     }
 
     #[test]
