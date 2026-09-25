@@ -30,3 +30,28 @@ jobs:
     with:
       retention-days: ${{ github.ref == 'refs/heads/main' && 30 || 7 }}
     # No secrets: dev builds are never signed, and never see signing keys.
+
+  # The CLI's tests on the other platforms. Kitsu has only been run on Linux
+  # so far, so this job reports what breaks there without holding back the
+  # installers; make it required once it has been green for a while.
+  cli-tests:
+    name: cli tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test -p kitsu --locked --no-fail-fast
