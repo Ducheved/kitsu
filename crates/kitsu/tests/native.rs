@@ -231,7 +231,8 @@ impl Env {
     }
 }
 
-/// The correct fix, from the scripted ACP agent's fixture.
+/// The correct fix, from the scripted ACP agent's fixture. With LF line
+/// endings: a Windows checkout of this repository may have CRLF.
 fn good_payments() -> String {
     let t: toml::Table = toml::from_str(
         &std::fs::read_to_string(fixtures().join("retry-storm/agents/good.toml"))
@@ -248,15 +249,19 @@ fn good_payments() -> String {
                 .and_then(|c| c.as_str())
         })
         .expect("write step")
-        .to_string()
+        .replace("\r\n", "\n")
 }
 
 /// Bounded retries, but a fresh key per attempt: fails idempotency.
 fn naive_payments() -> String {
-    good_payments().replace(
+    let good = good_payments();
+    let naive = good.replace(
         "    key = str(uuid.uuid4())\n    for attempt in range(MAX_ATTEMPTS):\n",
         "    for attempt in range(MAX_ATTEMPTS):\n        key = str(uuid.uuid4())\n",
-    )
+    );
+    // Otherwise the "false done" tests would be handing in the good fix.
+    assert_ne!(naive, good, "the naive variant differs from the good one");
+    naive
 }
 
 fn stop_reason(env: &Env, id: &str) -> (RunState, Option<String>) {
@@ -710,7 +715,9 @@ fn a_command_cut_off_by_a_crash_is_unknown_and_never_run_again() {
     let env = Env::new("crash-shell", &script, "");
     let wt = crash_and_resume(&env, "after_effect:shell", &["--policy", "auto"]);
     let log = std::fs::read_to_string(wt.join("log.txt")).expect("log.txt");
-    assert_eq!(log, "x\n", "ran once");
+    // Run b's worktree is a checkout of a's snapshot: git may have given it
+    // CRLF (core.autocrlf, Git for Windows' default).
+    assert_eq!(log.replace("\r\n", "\n"), "x\n", "ran once");
     let end = env
         .events("rb")
         .into_iter()
@@ -992,7 +999,9 @@ fn a_command_cut_off_by_a_crash_is_settled_before_anyone_is_asked_about_it() {
     );
     let wt = env.repo.join(".git/kitsu/worktrees/rb");
     assert_eq!(
-        std::fs::read_to_string(wt.join("log.txt")).expect("log"),
+        std::fs::read_to_string(wt.join("log.txt"))
+            .expect("log")
+            .replace("\r\n", "\n"),
         "x\n"
     );
     let end = env

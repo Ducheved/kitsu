@@ -662,11 +662,23 @@ mod tests {
         (List::new(dir.join(FILE)), dir)
     }
 
+    /// `/a` is absolute on Unix only; `C:/a` is on Windows.
+    fn abs(p: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{p}")
+        } else {
+            p.to_string()
+        }
+    }
+
     #[test]
     fn parse_refuses_what_would_make_the_list_ambiguous() {
         let p = Path::new("/cfg/workspaces.toml");
+        let (a, b) = (abs("/a"), abs("/b"));
         let ok = parse(
-            "[[workspace]]\nroot = \"/a\"\n\n[[workspace]]\nroot = \"/b\"\nname = \"Bee\"\n",
+            &format!(
+                "[[workspace]]\nroot = \"{a}\"\n\n[[workspace]]\nroot = \"{b}\"\nname = \"Bee\"\n"
+            ),
             p,
         )
         .expect("ok");
@@ -675,21 +687,34 @@ mod tests {
         assert_eq!(ok[1].display_name(), "Bee");
         assert!(parse("", p).expect("empty").is_empty());
 
-        for (text, why) in [
-            ("[[workspace]]\nroot = \"rel/path\"\n", "absolute"),
+        let mut refused = vec![
             (
-                "[[workspace]]\nroot = \"/a\"\n[[workspace]]\nroot = \"/a\"\n",
+                "[[workspace]]\nroot = \"rel/path\"\n".to_string(),
+                "absolute",
+            ),
+            (
+                format!("[[workspace]]\nroot = \"{a}\"\n[[workspace]]\nroot = \"{a}\"\n"),
                 "twice",
             ),
-            ("[[workspace]]\nroot = \"/a\"\nname = \"  \"\n", "empty"),
             (
-                "[[workspace]]\nroot = \"/a\"\ncolour = \"red\"\n",
+                format!("[[workspace]]\nroot = \"{a}\"\nname = \"  \"\n"),
+                "empty",
+            ),
+            (
+                format!("[[workspace]]\nroot = \"{a}\"\ncolour = \"red\"\n"),
                 "unknown field",
             ),
-            ("[[workspace]]\nname = \"x\"\n", "root"),
-            ("[[workspace]\n", ""),
-            ("theme = \"dark\"\n", "unknown field"),
-        ] {
+            ("[[workspace]]\nname = \"x\"\n".to_string(), "root"),
+            ("[[workspace]\n".to_string(), ""),
+            ("theme = \"dark\"\n".to_string(), "unknown field"),
+        ];
+        if cfg!(windows) {
+            // Rooted on whatever the current drive is, or relative to a
+            // drive's current folder: neither names one folder.
+            refused.push(("[[workspace]]\nroot = \"/a\"\n".to_string(), "absolute"));
+            refused.push(("[[workspace]]\nroot = 'C:a'\n".to_string(), "absolute"));
+        }
+        for (text, why) in &refused {
             let e = parse(text, p).expect_err(text);
             assert_eq!(e.kind(), "parse", "{text}");
             assert!(e.to_string().contains(why), "{text}: {e}");
@@ -701,11 +726,11 @@ mod tests {
     fn round_trip_keeps_order_and_names() {
         let entries = vec![
             Entry {
-                root: "/z/web".into(),
+                root: abs("/z/web").into(),
                 name: None,
             },
             Entry {
-                root: "/a/payments".into(),
+                root: abs("/a/payments").into(),
                 name: Some("Payments \"core\"".into()),
             },
         ];
