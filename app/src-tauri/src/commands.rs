@@ -522,6 +522,62 @@ pub async fn new_entity(
     .await
 }
 
+/// The task graph for the Plan view: every task with the lists the view
+/// edits, the version of its file, and the checks it can pick from. Status
+/// comes from `overview`, same as the rail.
+#[tauri::command]
+pub async fn plan(state: State<'_, AppState>) -> R<Value> {
+    let w = ws(&state)?;
+    blocking(move || {
+        let intent = Intent::load_dir(&w.root)?;
+        let tasks: Vec<Value> = intent
+            .tasks
+            .values()
+            .map(|t| {
+                let st = match t.state {
+                    intent::TaskState::Open => "open",
+                    intent::TaskState::Done => "done",
+                    intent::TaskState::Dropped => "dropped",
+                };
+                json!({ "id": t.id, "title": t.title, "state": st, "scope": t.scope.globs(), "checks": t.checks, "after": t.after, "path": t.source.path, "version": t.source.content_id })
+            })
+            .collect();
+        let checks: Vec<&String> = intent.config.checks.keys().collect();
+        Ok(json!({ "tasks": tasks, "checks": checks }))
+    })
+    .await
+}
+
+/// Change a task's `after`, `checks` and/or `scope` (a `null` list is left
+/// alone). Only those keys of its front matter are rewritten; an edit that
+/// would leave `.kitsu/` with a new problem, a cycle included, is refused
+/// before anything is written. Returns the file's new version.
+#[tauri::command]
+pub async fn update_task(
+    state: State<'_, AppState>,
+    id: String,
+    after: Option<Vec<String>>,
+    checks: Option<Vec<String>>,
+    scope: Option<Vec<String>>,
+    version: Option<String>,
+) -> R<String> {
+    let w = ws(&state)?;
+    blocking(move || {
+        let lists = kitsu::cli::TaskLists {
+            after,
+            checks,
+            scope,
+        };
+        Ok(kitsu::cli::update_task(
+            &w.root,
+            &id,
+            &lists,
+            version.as_deref(),
+        )?)
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn rules(state: State<'_, AppState>) -> R<Value> {
     let w = ws(&state)?;

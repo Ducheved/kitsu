@@ -111,6 +111,8 @@ fn main() {
             commands::accept_run,
             commands::discard_run,
             commands::new_entity,
+            commands::plan,
+            commands::update_task,
             commands::rules,
             commands::run_checks,
             commands::read_file,

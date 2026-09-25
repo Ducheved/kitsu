@@ -1144,6 +1144,114 @@ pub fn answer_question(text: &str, answer: &str) -> std::result::Result<String, 
     ))
 }
 
+/// New values for a task's lists; `None` leaves that key alone.
+#[derive(Debug, Clone, Default)]
+pub struct TaskLists {
+    pub after: Option<Vec<String>>,
+    pub checks: Option<Vec<String>>,
+    pub scope: Option<Vec<String>>,
+}
+
+/// Rewrite a task's `after`, `checks` and/or `scope` in place, a person's
+/// edit from the UI. Everything else in the file stays byte for byte. The
+/// edited `.kitsu/` is parsed before anything is written: an edit that
+/// would add a problem (an unknown task or check, a dependency cycle) is
+/// refused and the file is left alone. With `version`, the file must still
+/// be what the caller last saw. Returns the new content id.
+pub fn update_task(
+    root: &Path,
+    id: &str,
+    lists: &TaskLists,
+    version: Option<&str>,
+) -> Result<String> {
+    intent::valid_id(id).map_err(Error::Invalid)?;
+    let clean = |v: &[String]| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for s in v.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if !out.iter().any(|o| o == s) {
+                out.push(s.to_string());
+            }
+        }
+        out
+    };
+    let after = lists.after.as_deref().map(clean);
+    let checks = lists.checks.as_deref().map(clean);
+    let scope = lists.scope.as_deref().map(clean);
+    for a in after.iter().flatten().chain(checks.iter().flatten()) {
+        intent::valid_id(a).map_err(Error::Invalid)?;
+    }
+    if after.as_ref().is_some_and(|a| a.iter().any(|x| x == id)) {
+        return Err(Error::Invalid(format!("task {id} can't wait for itself")));
+    }
+    for g in scope.iter().flatten() {
+        if g.len() > 512
+            || g.chars().any(char::is_control)
+            || g.starts_with('/')
+            || g.split('/').any(|seg| seg == "..")
+        {
+            return Err(Error::Invalid(format!(
+                "`{g}` is not a repository path glob"
+            )));
+        }
+    }
+
+    let mut files = intent::dir_files(root)?;
+    let before = Intent::from_files(files.clone());
+    let task = before
+        .tasks
+        .get(id)
+        .ok_or_else(|| Error::NotFound(format!("task {id}")))?;
+    if version.is_some_and(|v| v != task.source.content_id) {
+        return Err(Error::Conflict(format!(
+            "{} changed on disk since it was read",
+            task.source.path
+        )));
+    }
+    let rel = task.source.path.clone();
+    let path = root.join(&rel);
+    let slot = files
+        .iter_mut()
+        .find(|(p, _)| *p == rel)
+        .ok_or_else(|| Error::NotFound(rel.clone()))?;
+    let parse_err = |detail: String| Error::Parse {
+        path: path.clone(),
+        detail,
+    };
+    let mut text =
+        String::from_utf8(slot.1.clone()).map_err(|_| parse_err("not valid UTF-8".into()))?;
+    for (key, values) in [("after", &after), ("checks", &checks), ("scope", &scope)] {
+        if let Some(v) = values {
+            text = intent::set_list(&text, key, v).map_err(parse_err)?;
+        }
+    }
+    slot.1 = text.clone().into_bytes();
+    let edited = Intent::from_files(files);
+    let known: std::collections::BTreeSet<(&str, &str)> = before
+        .problems
+        .iter()
+        .map(|p| (p.path.as_str(), p.detail.as_str()))
+        .collect();
+    let new: Vec<String> = edited
+        .problems
+        .iter()
+        .filter(|p| !known.contains(&(p.path.as_str(), p.detail.as_str())))
+        .map(|p| format!("{}: {}", p.path, p.detail))
+        .collect();
+    if !new.is_empty() {
+        return Err(Error::Invalid(format!(
+            "not saved, it would break the task files: {}",
+            new.join("; ")
+        )));
+    }
+    let tmp = path.with_extension(format!("kitsu-edit-{}", crate::util::short_id('e')));
+    std::fs::write(&tmp, &text).map_err(|e| Error::io(tmp.display().to_string(), e))?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        Error::io(path.display().to_string(), e)
+    })?;
+    Ok(crate::util::content_id(text.as_bytes()))
+}
+
 fn review(ws: &Workspace, run: &str, diff: bool, json: bool) -> Result<()> {
     let store = ws.open_store()?;
     let r = integrate::review(ws, &store, run)?;
@@ -1687,6 +1795,89 @@ mod tests {
         assert_eq!(parsed.state, QuestionState::Answered);
         assert_eq!(parsed.answer.as_deref(), Some("Yes, \"24h\""));
         assert!(a.ends_with("Context here.\n"));
+    }
+
+    #[test]
+    fn updating_a_task_keeps_the_rest_and_refuses_what_would_break() {
+        let root =
+            std::env::temp_dir().join(format!("kitsu-update-{}", crate::util::short_id('t')));
+        let tasks = root.join(".kitsu/tasks");
+        std::fs::create_dir_all(&tasks).expect("mkdir");
+        std::fs::write(
+            root.join(".kitsu/kitsu.toml"),
+            "[checks.test]\nrun = \"t\"\n[checks.lint]\nrun = \"l\"\n",
+        )
+        .expect("config");
+        let a = "+++\ntitle = \"A\"   # first\nscope = []\nchecks = [\"test\"]\n+++\n# A\n\nBody with after = [\"x\"].\n";
+        std::fs::write(tasks.join("a.md"), a).expect("a");
+        std::fs::write(tasks.join("b.md"), "+++\ntitle = \"B\"\n+++\n").expect("b");
+        let read = |n: &str| std::fs::read_to_string(tasks.join(n)).expect("read");
+
+        let lists = TaskLists {
+            after: Some(vec!["b".into(), " b ".into()]),
+            checks: Some(vec!["test".into(), "lint".into()]),
+            scope: Some(vec!["src/**".into(), "".into()]),
+        };
+        let v = update_task(&root, "a", &lists, None).expect("update");
+        assert_eq!(
+            read("a.md"),
+            "+++\ntitle = \"A\"   # first\nscope = [\"src/**\"]\nchecks = [\"test\", \"lint\"]\nafter = [\"b\"]\n+++\n# A\n\nBody with after = [\"x\"].\n"
+        );
+        assert_eq!(v, crate::util::content_id(read("a.md").as_bytes()));
+
+        // b waiting for a closes a cycle: refused, nothing written.
+        let cycle = TaskLists {
+            after: Some(vec!["a".into()]),
+            ..Default::default()
+        };
+        let err = update_task(&root, "b", &cycle, None).expect_err("cycle");
+        assert!(err.to_string().contains("cycle"), "{err}");
+        assert_eq!(read("b.md"), "+++\ntitle = \"B\"\n+++\n");
+
+        // Unknown names, bad ids, bad globs, stale versions: refused.
+        for bad in [
+            TaskLists {
+                after: Some(vec!["ghost".into()]),
+                ..Default::default()
+            },
+            TaskLists {
+                checks: Some(vec!["tset".into()]),
+                ..Default::default()
+            },
+            TaskLists {
+                after: Some(vec!["--flag".into()]),
+                ..Default::default()
+            },
+            TaskLists {
+                after: Some(vec!["a".into()]),
+                ..Default::default()
+            },
+            TaskLists {
+                scope: Some(vec!["../etc/**".into()]),
+                ..Default::default()
+            },
+        ] {
+            assert!(update_task(&root, "a", &bad, None).is_err(), "{bad:?}");
+        }
+        let before = read("a.md");
+        assert!(update_task(&root, "a", &TaskLists::default(), Some("stale")).is_err());
+        assert!(update_task(&root, "nope", &TaskLists::default(), None).is_err());
+        assert_eq!(read("a.md"), before);
+
+        // Emptying `after` keeps the key and the body.
+        let v2 = update_task(
+            &root,
+            "a",
+            &TaskLists {
+                after: Some(vec![]),
+                ..Default::default()
+            },
+            Some(&v),
+        )
+        .expect("clear");
+        assert!(read("a.md").contains("after = []\n+++\n# A\n"));
+        assert_ne!(v, v2);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
