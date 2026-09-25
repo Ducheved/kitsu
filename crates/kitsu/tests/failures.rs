@@ -806,10 +806,15 @@ fn memory_goes_stale_with_its_code_and_reaches_the_brief() {
         "--body",
         "From their API docs, section Idempotency.",
     ]);
+    // The path it wrote, in this platform's separators.
     assert!(
-        path.trim()
+        Path::new(path.trim())
             .ends_with(".kitsu/memory/upstream-dedupes-idempotency-keys-for-24-hours.md"),
         "{path}"
+    );
+    assert!(
+        !(path.contains('/') && path.contains('\\')),
+        "one kind of separator: {path}"
     );
     git(&env.repo, &["add", "-A"]);
     git(&env.repo, &["commit", "-qm", "remember dedupe"]);
