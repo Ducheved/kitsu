@@ -26,8 +26,11 @@ doom_loop); cancel kills a running command and ends the run cancelled;
 429/5xx retried with backoff up to five attempts, 401 not at all; paths
 confined to the worktree, a symlink made with shell included.
 
+Also in (decision `native-providers`): Anthropic Messages and OpenAI
+Responses next to Chat Completions, and `kitsu login openrouter` with the
+key in the OS keychain.
+
 Still to do:
 - A live comparison on OpenRouter once the key reaches a session: the
   same tasks with this loop and with Claude Code, verified runs and cost.
-- Anthropic Messages as a second provider, when someone needs it.
 - A cloud brain over WSS (the host stays local), when someone needs it.

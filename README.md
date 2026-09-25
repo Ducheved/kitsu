@@ -112,18 +112,36 @@ Agent commands only ever come from your config, never from the repository.
 
 Through an external agent, Kitsu can only put advice into someone else's
 context: after Claude Code compacted its conversation, none of a brief sent
-as a message survived. So Kitsu also has its own loop, for any
-OpenAI-compatible endpoint (OpenRouter, a local server):
+as a message survived. So Kitsu also has its own loop. It speaks three wire
+formats (`provider`): OpenAI-compatible Chat Completions (OpenRouter, a
+local server; the default), Anthropic Messages and OpenAI Responses:
 
 ```toml
 [agents.kitsu]
 native = { base_url = "https://openrouter.ai/api/v1", model = "<model id>", api_key_env = "OPENROUTER_API_KEY" }
 # optional: context_window, max_output, turns (per run), tokens (per run)
+
+[agents.claude-api]
+native = { provider = "anthropic-messages", base_url = "https://api.anthropic.com", model = "<model id>", api_key_env = "ANTHROPIC_API_KEY", context_window = 200000 }
+
+[agents.openai]
+native = { provider = "openai-responses", base_url = "https://api.openai.com/v1", model = "<model id>", api_key_env = "OPENAI_API_KEY" }
+
+# The key from `kitsu login openrouter` instead of a variable; works with
+# all three formats through OpenRouter.
+[agents.kitsu-or]
+native = { provider = "anthropic-messages", base_url = "https://openrouter.ai/api", model = "anthropic/<model>", auth = "login:openrouter" }
 ```
+
+`base_url` follows each vendor's convention: Anthropic's without the
+version (`/v1/messages` is appended), OpenAI's with it (`/chat/completions`
+or `/responses`). Plain `http` only to this machine.
 
 ```sh
 kitsu run <task> --agent kitsu
 kitsu run <task> --agent kitsu --from <run> --resume   # after a crash or a budget stop
+kitsu login openrouter    # sign in in the browser; the key goes to the OS keychain
+kitsu logout openrouter
 ```
 
 What it does differently:
@@ -140,8 +158,21 @@ What it does differently:
   outcome is unknown.
 - **Tools instead of a shell,** with closed schemas and bounded output; the
   shell is one tool among twelve, under the same policy and CPU limits.
-- **The key is named, not stored.** It's read from `api_key_env`, sent in one
-  header, and never written to the journal, logs or the tools' environment.
+- **The key is named, not stored.** It's read from `api_key_env` or the OS
+  keychain (`auth = "login:<provider>"`), sent in one header, and never
+  written to the journal, logs or the tools' environment. `kitsu login`
+  uses the provider's own sign-in for third-party apps (OpenRouter's OAuth
+  PKCE, which issues a key you can revoke on openrouter.ai) and fails
+  without a keychain rather than writing the key to a file. Anthropic and
+  OpenAI don't offer third-party apps a sign-in with a Claude or ChatGPT
+  subscription; to use one, run their own agent (`--agent claude`,
+  `--agent codex`), which signs in itself.
+- **Same loop, any format.** The conversation, the journal, compaction,
+  resume and loop detection are the same for all three; a provider only
+  renders the request. Anthropic requests carry cache marks on the harness,
+  the brief and the conversation, never on the ledger; Responses runs
+  stateless (`store: false`) and sends reasoning items back as they came,
+  from the journal after a resume.
 
 The loop is a brain (model calls) and a host (tools, journal, checks) that
 talk only in JSON-RPC, so the brain can later run elsewhere while your
