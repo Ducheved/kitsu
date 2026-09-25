@@ -4,6 +4,7 @@
 //! replaceable (ACP); Kitsu owns the state and the lifecycle around them.
 
 pub mod acp;
+pub mod agent;
 pub mod agents;
 pub mod arch;
 pub mod brief;

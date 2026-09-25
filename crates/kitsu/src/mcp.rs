@@ -99,6 +99,18 @@ impl Server {
         })
     }
 
+    /// One of the read-only tools, as text (Kitsu's own agent uses these).
+    pub fn tool_text(&self, name: &str, args: &Value) -> Result<String> {
+        match name {
+            "search" => self.search(args),
+            "orient" => self.orient(),
+            "rules_for" => self.rules_for(args),
+            "brief" => self.brief(),
+            "memory" => self.memory(),
+            other => Err(Error::Invalid(format!("unknown tool `{other}`"))),
+        }
+    }
+
     fn call(&self, params: &Value) -> Value {
         let name = params["name"].as_str().unwrap_or("");
         let args = &params["arguments"];

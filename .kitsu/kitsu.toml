@@ -68,7 +68,7 @@ paths = ["crates/kitsu/tests/**", "fixtures/**", "app/src-tauri/capabilities/**"
 # Every Rust module belongs to exactly one component of the model in
 # .kitsu/architecture/. A new module without one fails `kitsu arch check`.
 [architecture]
-cover = ["crates/kitsu/src/*.rs", "crates/kitsu/src/bin/*.rs", "app/src-tauri/src/*.rs"]
+cover = ["crates/kitsu/src/*.rs", "crates/kitsu/src/agent/*.rs", "crates/kitsu/src/bin/*.rs", "app/src-tauri/src/*.rs"]
 
 [checks.architecture]
 run = "cargo run -q -p kitsu --bin kitsu -- arch check"

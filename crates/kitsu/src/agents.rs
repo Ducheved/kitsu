@@ -45,7 +45,74 @@ pub struct AgentSpec {
     /// agents.toml adds more with `pass_env = [...]`. Everything else in
     /// Kitsu's environment (other tokens, a host tool's session) stays out.
     pub pass_env: Vec<String>,
+    /// Kitsu's own loop instead of an ACP process (`native = {...}` in
+    /// agents.toml). `command` is empty then.
+    pub native: Option<NativeSpec>,
     pub source: &'static str,
+}
+
+/// Kitsu's own agent loop: which model, where, and how much it may spend.
+/// The key is named, never stored: `api_key_env` is read when a run starts.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSpec {
+    /// Only `openai-chat` (OpenAI-compatible Chat Completions, e.g.
+    /// OpenRouter) for now.
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key_env: String,
+    #[serde(default = "default_window")]
+    pub context_window: u64,
+    #[serde(default = "default_max_output")]
+    pub max_output: u64,
+    /// Model requests per run.
+    #[serde(default = "default_turns")]
+    pub turns: u32,
+    /// Prompt plus completion tokens per run.
+    #[serde(default = "default_tokens")]
+    pub tokens: u64,
+}
+
+fn default_provider() -> String {
+    "openai-chat".into()
+}
+fn default_window() -> u64 {
+    128_000
+}
+fn default_max_output() -> u64 {
+    16_000
+}
+fn default_turns() -> u32 {
+    150
+}
+fn default_tokens() -> u64 {
+    8_000_000
+}
+
+impl NativeSpec {
+    fn validate(&self) -> std::result::Result<(), String> {
+        if self.provider != "openai-chat" {
+            return Err(format!(
+                "unknown provider `{}` (openai-chat)",
+                self.provider
+            ));
+        }
+        let url = self.base_url.trim();
+        let loopback = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
+            .iter()
+            .any(|p| url.starts_with(p));
+        if !(url.starts_with("https://") || loopback) {
+            return Err(format!(
+                "base_url `{url}` must be https (plain http only to this machine), or the key would travel in the clear"
+            ));
+        }
+        if self.max_output >= self.context_window {
+            return Err("max_output must be smaller than context_window".into());
+        }
+        Ok(())
+    }
 }
 
 /// What every agent process gets from Kitsu's environment: enough to find
@@ -334,6 +401,7 @@ pub fn on_path(program: &str) -> bool {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Entry {
+    #[serde(default)]
     command: Vec<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
@@ -341,6 +409,7 @@ struct Entry {
     mcp: Option<bool>,
     #[serde(default)]
     pass_env: Vec<String>,
+    native: Option<NativeSpec>,
 }
 
 pub fn all() -> Result<Vec<AgentSpec>> {
@@ -355,6 +424,7 @@ pub fn all() -> Result<Vec<AgentSpec>> {
                 meta: preset_meta(name),
                 mcp: true,
                 pass_env: preset_pass_env(name),
+                native: None,
                 source: "preset",
             },
         );
@@ -369,6 +439,7 @@ pub fn all() -> Result<Vec<AgentSpec>> {
                 meta: None,
                 mcp: true,
                 pass_env: preset_pass_env("test"),
+                native: None,
                 source: "bundled",
             },
         );
@@ -393,8 +464,20 @@ fn apply_config(
     };
     let file: File = toml::from_str(text).map_err(|e| bad(e.message().to_string()))?;
     for (name, e) in file.agents {
-        if e.command.is_empty() {
-            return Err(bad(format!("agent `{name}` has an empty command")));
+        match &e.native {
+            Some(n) => {
+                n.validate()
+                    .map_err(|d| bad(format!("agent `{name}`: {d}")))?;
+                if !e.command.is_empty() {
+                    return Err(bad(format!(
+                        "agent `{name}` has both `command` and `native`; it is one or the other"
+                    )));
+                }
+            }
+            None if e.command.is_empty() => {
+                return Err(bad(format!("agent `{name}` has an empty command")));
+            }
+            None => {}
         }
         let pass_env: Vec<String> = preset_pass_env(&name)
             .into_iter()
@@ -417,6 +500,7 @@ fn apply_config(
                 meta,
                 mcp: e.mcp.unwrap_or(true),
                 pass_env,
+                native: e.native,
                 source: "agents.toml",
             },
         );
@@ -466,6 +550,7 @@ mod tests {
                         meta: preset_meta(n),
                         mcp: true,
                         pass_env: preset_pass_env(n),
+                        native: None,
                         source: "preset",
                     },
                 )

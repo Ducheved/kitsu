@@ -47,7 +47,7 @@ const EXIT_GRACE: Duration = Duration::from_secs(5);
 /// Safety-net poll. Cancels and answers normally arrive as a nudge (see
 /// `Wake`); the tick only covers a lost signal or a platform without one.
 /// At 10 Hz, 100 idle workers cost 8% of a core; at 1 Hz, under 1%.
-const TICK: Duration = Duration::from_millis(1000);
+pub(crate) const TICK: Duration = Duration::from_millis(1000);
 
 /// Wakes the worker when someone records a cancel or an answer for its run.
 /// Installed before the run exists: SIGUSR1's default action is to kill
@@ -70,7 +70,7 @@ impl Wake {
         Ok(Wake {})
     }
 
-    async fn recv(&mut self) {
+    pub(crate) async fn recv(&mut self) {
         #[cfg(unix)]
         {
             self.sig.recv().await;
@@ -228,6 +228,9 @@ pub async fn drive(
     echo: bool,
     wake: &mut Wake,
 ) -> Result<RunState> {
+    if let Some(native) = &opts.agent.native {
+        return crate::agent::drive(ws, store, prep, opts, native, echo, wake).await;
+    }
     let id = prep.id.as_str();
     let log_path = run_dir(ws, id).join("agent.log");
     let log = std::fs::File::create(&log_path)
@@ -717,7 +720,7 @@ async fn shut_down(child: &mut tokio::process::Child) {
     }
 }
 
-async fn kill_group(child: &mut tokio::process::Child) {
+pub(crate) async fn kill_group(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
         let _ = Command::new("kill")

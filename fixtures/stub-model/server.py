@@ -292,7 +292,8 @@ def main():
             SCRIPT = json.load(f)
     Handler.args = args
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"stub model on 127.0.0.1:{args.port}", file=sys.stderr, flush=True)
+    # --port 0 picks a free port; this line says which.
+    print(f"stub model on 127.0.0.1:{srv.server_address[1]}", file=sys.stderr, flush=True)
     srv.serve_forever()
 
 
