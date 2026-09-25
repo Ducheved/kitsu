@@ -359,7 +359,7 @@ const fr: Messages = {
   "plan.tidyHint": "Oublier où vous avez déplacé les blocs et les disposer à nouveau",
   "plan.hintLink": "glissez vers une tâche pour qu’elle attende",
   "plan.hintAdd": "double-clic pour ajouter une tâche",
-  "plan.hintRemove": "cliquez un lien pour le retirer",
+  "plan.hintRemove": "cliquez un lien, puis",
   "plan.hintMove": "se déplacer",
   "plan.hintEdit": "modifier",
   "plan.out": "Glissez vers une tâche qui doit attendre celle-ci",

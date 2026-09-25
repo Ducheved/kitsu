@@ -351,7 +351,7 @@ const ja: Messages = {
   "plan.tidyHint": "動かした位置を忘れて、並べ直します",
   "plan.hintLink": "別のタスクへドラッグすると、そのタスクが待ちます",
   "plan.hintAdd": "ダブルクリックでタスクを追加",
-  "plan.hintRemove": "リンクをクリックして削除",
+  "plan.hintRemove": "リンクを選んで",
   "plan.hintMove": "移動",
   "plan.hintEdit": "編集",
   "plan.out": "これを待つべきタスクへドラッグ",

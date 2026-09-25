@@ -351,7 +351,7 @@ const de: Messages = {
   "plan.tidyHint": "Verschobene Blöcke vergessen und neu anordnen",
   "plan.hintLink": "auf eine Aufgabe ziehen, damit sie wartet",
   "plan.hintAdd": "Doppelklick fügt eine Aufgabe hinzu",
-  "plan.hintRemove": "Verbindung anklicken zum Entfernen",
+  "plan.hintRemove": "Verbindung anklicken, dann",
   "plan.hintMove": "bewegen",
   "plan.hintEdit": "bearbeiten",
   "plan.out": "Auf eine Aufgabe ziehen, die auf diese warten soll",

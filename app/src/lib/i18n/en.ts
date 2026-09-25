@@ -354,7 +354,7 @@ const en = {
   "plan.tidyHint": "Forget where you moved blocks and lay them out again",
   "plan.hintLink": "drag to another task to make it wait",
   "plan.hintAdd": "double-click to add a task",
-  "plan.hintRemove": "click a link to remove it",
+  "plan.hintRemove": "click a link, then",
   "plan.hintMove": "move",
   "plan.hintEdit": "edit",
   "plan.out": "Drag onto a task that should wait for this one",
