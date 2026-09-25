@@ -102,6 +102,8 @@ pub struct OpenAiChat {
     url: String,
     model: String,
     max_output: u64,
+    /// Mark cache breakpoints in the request (see `mark_cache`).
+    cache: bool,
     key: Secret,
 }
 
@@ -140,15 +142,20 @@ impl OpenAiChat {
             url: format!("{}/chat/completions", spec.base_url.trim_end_matches('/')),
             model: spec.model.clone(),
             max_output: spec.max_output,
+            cache: marks_cache(&spec.model),
             key: Secret(key),
         })
     }
 
     /// The request body, without the key. Also what `request_sha` hashes.
     pub fn body(&self, messages: &[Msg], tools: &Value) -> Value {
+        let mut msgs: Vec<Value> = messages.iter().map(to_openai).collect();
+        if self.cache {
+            mark_cache(&mut msgs);
+        }
         json!({
             "model": self.model,
-            "messages": messages.iter().map(to_openai).collect::<Vec<_>>(),
+            "messages": msgs,
             "tools": tools,
             "tool_choice": "auto",
             "max_tokens": self.max_output,
@@ -251,6 +258,45 @@ fn to_openai(m: &Msg) -> Value {
         }
         Msg::Tool { call_id, text } => {
             json!({ "role": "tool", "tool_call_id": call_id, "content": text })
+        }
+    }
+}
+
+/// Anthropic models cache only what the request marks with `cache_control`;
+/// OpenRouter passes the marks through (and names these models
+/// `anthropic/…`). OpenAI, DeepSeek and Gemini cache on their own, and a
+/// plain OpenAI-compatible server may refuse a field it doesn't know, so
+/// nothing else gets marks.
+fn marks_cache(model: &str) -> bool {
+    model.trim_start_matches('~').starts_with("anthropic/")
+}
+
+/// Cache breakpoints (Anthropic allows four; this uses three): after the
+/// harness prompt, the same bytes for every run, so the tool list and the
+/// harness hit across runs; after the brief, the same for the whole run;
+/// and on the message before the ledger, so each request reads the
+/// conversation the previous one wrote. The ledger changes on every request
+/// and stays after the last mark (see `context`).
+fn mark_cache(msgs: &mut [Value]) {
+    let systems: Vec<usize> = (0..msgs.len())
+        .filter(|&i| msgs[i]["role"] == "system")
+        .collect();
+    let mut at: Vec<usize> = systems
+        .first()
+        .into_iter()
+        .chain(systems.last())
+        .copied()
+        .collect();
+    if msgs.len() >= 2 {
+        at.push(msgs.len() - 2);
+    }
+    at.sort_unstable();
+    at.dedup();
+    for i in at {
+        // An assistant turn with only tool calls has no text to mark.
+        if let Some(t) = msgs[i]["content"].as_str().map(str::to_string) {
+            msgs[i]["content"] =
+                json!([{ "type": "text", "text": t, "cache_control": { "type": "ephemeral" } }]);
         }
     }
 }
@@ -452,6 +498,53 @@ mod tests {
             classify(400, r#"{"error":{"message":"unknown model"}}"#, None),
             ProviderError::Fatal(_)
         ));
+    }
+
+    #[test]
+    fn anthropic_requests_mark_the_stable_prefix_and_not_the_ledger() {
+        assert!(marks_cache("anthropic/claude-sonnet-5"));
+        assert!(marks_cache("~anthropic/claude-sonnet-latest"));
+        assert!(!marks_cache("openai/gpt-5-mini"));
+        assert!(!marks_cache("claude-sonnet-5"));
+
+        let conv = [
+            Msg::System("harness".into()),
+            Msg::System("brief".into()),
+            Msg::User("begin".into()),
+            Msg::Assistant {
+                text: None,
+                calls: vec![ToolCall {
+                    id: "t1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }],
+            },
+            Msg::Tool {
+                call_id: "t1".into(),
+                text: "result".into(),
+            },
+            Msg::User("ledger".into()),
+        ];
+        let mut msgs: Vec<Value> = conv.iter().map(to_openai).collect();
+        mark_cache(&mut msgs);
+        let marked: Vec<bool> = msgs
+            .iter()
+            .map(|m| m["content"][0]["cache_control"]["type"] == "ephemeral")
+            .collect();
+        assert_eq!(marked, [true, true, false, false, true, false]);
+        assert_eq!(msgs[4]["content"][0]["text"], "result");
+        assert_eq!(msgs[4]["tool_call_id"], "t1");
+        assert_eq!(msgs[5]["content"], "ledger");
+
+        // The first request: the mark before the ledger lands on "begin".
+        let mut first: Vec<Value> = conv[..3].iter().chain(&conv[5..]).map(to_openai).collect();
+        mark_cache(&mut first);
+        assert!(
+            first[..3]
+                .iter()
+                .all(|m| m["content"][0]["cache_control"].is_object())
+        );
+        assert_eq!(first[3]["content"], "ledger");
     }
 
     #[test]
