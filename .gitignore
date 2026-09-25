@@ -22,3 +22,8 @@ target
 
 # Agent worktrees made by Claude Code sessions.
 .claude/worktrees/
+
+# Output of fixtures/eval/run.py (its default --out), and Python's caches
+# from the fixtures.
+/results/
+__pycache__/

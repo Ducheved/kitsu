@@ -1,0 +1,9 @@
+[checks.tax]
+run = "python3 -m unittest -q test_tax"
+timeout = "1m"
+scope = ["tax.py", "invoice.py", "rates.csv", "test_tax.py"]
+guards = ["tax.py", "invoice.py", "rates.csv"]
+why = "Every invoice carries the VAT finance signed off; a country without a rate is an error, never a guess."
+
+[protect]
+paths = ["test_*.py", "rates.csv"]

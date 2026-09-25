@@ -1,0 +1,9 @@
+[checks.webhooks]
+run = "python3 -m unittest -q test_webhooks"
+timeout = "1m"
+scope = ["webhooks.py", "fake_receiver.py", "test_webhooks.py"]
+guards = ["webhooks.py"]
+why = "A delivery ends: one dead endpoint must not hold a worker forever."
+
+[protect]
+paths = ["test_*.py", "fake_receiver.py"]

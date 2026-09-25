@@ -1,0 +1,7 @@
+task = "slow-dedupe"
+kind = "performance fix with a behaviour constraint"
+expect = "done"
+
+[dryrun]
+good = "done"
+bad = "done"

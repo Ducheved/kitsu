@@ -1,0 +1,9 @@
+[checks.dedupe]
+run = "python3 -m unittest -q test_dedupe"
+timeout = "2m"
+scope = ["dedupe.py", "importer.py", "test_dedupe.py"]
+guards = ["dedupe.py", "importer.py"]
+why = "The import keeps the first occurrence of each row in file order: downstream reports number rows by position."
+
+[protect]
+paths = ["test_*.py"]
