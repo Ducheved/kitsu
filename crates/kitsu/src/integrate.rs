@@ -99,6 +99,16 @@ fn reviewable(run: &RunRow) -> Result<&str> {
         .ok_or_else(|| Error::Invalid(format!("run {} has no snapshot", run.id)))
 }
 
+/// Problems in the rule files at `rev`, as "path: detail".
+fn rule_problems(git: &Git, rev: &str) -> Result<Vec<String>> {
+    let intent = Intent::from_files(git.files_at(rev, intent::DIR)?);
+    Ok(intent
+        .problems
+        .iter()
+        .map(|p| format!("{}: {}", p.path, p.detail))
+        .collect())
+}
+
 fn protected_diff_token(
     git: &Git,
     from: &str,
@@ -264,6 +274,22 @@ fn build_and_apply(
     );
     let candidate = scratch.commit_as_user(&message, &ws.no_hooks())?;
     store.set_integration(id, IntegrationState::Verifying, Some(&candidate), None)?;
+
+    // The rules you judge by come from your checkout, but the ones being
+    // landed must parse too: a broken rule file on the target blocks every
+    // later accept. Only problems the change adds count, so a file that was
+    // already broken doesn't hold up an unrelated change.
+    let before = rule_problems(git, head)?;
+    let added: Vec<String> = rule_problems(git, &candidate)?
+        .into_iter()
+        .filter(|p| !before.contains(p))
+        .collect();
+    if !added.is_empty() {
+        return Err(Error::Denied(format!(
+            "this change breaks the rule files it would land:\n  {}",
+            added.join("\n  ")
+        )));
+    }
 
     let changed = git.changed_paths(head, &candidate)?;
     let tree = git.tree_of(&candidate)?;

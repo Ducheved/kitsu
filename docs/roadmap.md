@@ -17,7 +17,6 @@ the checks decide, Kitsu owns the state, nothing lands without you.
 | **Installers for Windows, macOS and Linux on every commit,** and releases versioned by the rules: SemVer from Conventional Commits, a changelog, tagged releases with checksums | a green run on all three platforms with downloadable builds; `kitsu --version` names the exact commit |
 | **A task-graph constructor.** Build chains of tasks by dragging blocks; edges are `after`, and the result is ordinary task files | edit a graph in the app, see the diff of `.kitsu/tasks/`, accept it like any other change |
 | **Typed judgments (Jev)** for the few decisions that are really semantic, starting with permission triage: low-risk calls inside the worktree can go through without asking you, everything else still asks, with the probability shown (`judge-core`, `judge-permissions`) | recorded-response tests for every case; a failed judgment always means "ask you". Measuring whether it helps needs a TypeSafe key (`typesafe-key`) |
-| **Accept checks the rules it's landing,** not only the ones in your checkout, so a broken task file can't slip in and block every later accept | an end-to-end test where a run lands a cyclic task graph and accept refuses it |
 
 ## Next
 

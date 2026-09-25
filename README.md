@@ -233,7 +233,7 @@ Verified here means an automated test or a measurement in this repo does it.
 | | |
 |---|---|
 | Brief compilation, scopes, evidence freshness, the run state machine (every state × event pair) | unit tests |
-| Crash mid-turn, hang + stop, ignored cancel, duplicate completion, garbage on the wire, `kill -9` of the worker, permission asks, conflicts, combined-result checks, weakened tests, broken rule files, hand-off between agents, interrupted accepts | 18 end-to-end tests through the real binaries |
+| Crash mid-turn, hang + stop, ignored cancel, duplicate completion, garbage on the wire, `kill -9` of the worker, permission asks, conflicts, combined-result checks, weakened tests, broken rule files in your checkout or in the change, hand-off between agents, interrupted accepts | 26 end-to-end tests through the real binaries |
 | 100 concurrent runs: 0 failures, ≤1.2% of one core idle, 2–3 ms status refresh | `examples/scale.rs stress`, in CI |
 | Desktop app on Linux (WebKitGTK): open repo, review, accept with `a`, start a run | driven by hand under Xvfb |
 | UI flows and screens | Chromium on fixture data |

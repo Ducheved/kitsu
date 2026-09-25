@@ -647,6 +647,36 @@ fn a_broken_rule_file_blocks_accept_and_is_loud_in_the_brief() {
 }
 
 #[test]
+fn a_change_that_breaks_the_rule_files_it_lands_is_refused() {
+    let env = Env::new("breaks-rules");
+    // The right fix, plus a task that waits on itself. Your checkout's rules
+    // are fine, so only reading the candidate's rules can catch it.
+    let good = std::fs::read_to_string(agent("good")).expect("good script");
+    let s = env.script(
+        "breaks-rules",
+        &format!(
+            "{good}\n[[steps]]\nwrite = {{ path = \".kitsu/tasks/loop.md\", content = \"+++\\ntitle = \\\"Loop\\\"\\nafter = [\\\"loop\\\"]\\n+++\\n\" }}\n"
+        ),
+    );
+    env.run_with(&s, "rloop", &[]);
+    let o = env.out(&["--json", "accept", "rloop"]);
+    assert_eq!(o.status.code(), Some(3));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).expect("json");
+    assert_eq!(v["result"], "needs_approval", "{v}");
+    let token = v["token"].as_str().expect("token").to_string();
+    // Even approved, it can't land: every later accept would be blocked.
+    let o = env.out(&["accept", "rloop", "--approve", &token]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(3), "{err}");
+    assert!(err.contains(".kitsu/tasks/loop.md"), "{err}");
+    assert_eq!(
+        git(&env.repo, &["rev-list", "--count", "HEAD"]).trim(),
+        "1",
+        "nothing landed"
+    );
+}
+
+#[test]
 fn a_different_agent_can_continue_from_a_previous_run() {
     let env = Env::new("handoff");
     let first = env.script(
