@@ -227,7 +227,11 @@ fn a_change_no_check_looks_at_is_unknown_not_green() {
     let env = Env::new("unguarded");
     // `retries` looks at the whole repository until it says otherwise.
     let toml = env.repo.join(".kitsu/kitsu.toml");
-    let cfg = std::fs::read_to_string(&toml).expect("toml").replacen(
+    // The fixture may be checked out with CRLF (Windows); match on LF.
+    let cfg = std::fs::read_to_string(&toml)
+        .expect("toml")
+        .replace("\r\n", "\n")
+        .replacen(
         "timeout = \"1m\"\n",
         "timeout = \"1m\"\nscope = [\"payments.py\", \"test_retries.py\", \"fake_upstream.py\"]\n",
         1,

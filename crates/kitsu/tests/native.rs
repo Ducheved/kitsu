@@ -1130,6 +1130,14 @@ fn a_background_process_does_not_hold_the_call() {
     };
     let (begin, end) = (at("tool.begin"), at("tool.end"));
     assert!(end - begin < 4500, "the call took {} ms", end - begin);
+    let said = last_tool_text(&env.requests()[1]);
+    if cfg!(windows) {
+        // Windows can't find it once sh is gone; the model is told so
+        // instead of being told it was stopped (task windows-job-objects).
+        assert!(said.contains("may still be running"), "{said}");
+        return;
+    }
+    assert!(said.contains("they were stopped"), "{said}");
     // What it left running was stopped with it.
     std::thread::sleep(std::time::Duration::from_millis(
         (7500 - (end - begin)).max(0) as u64,

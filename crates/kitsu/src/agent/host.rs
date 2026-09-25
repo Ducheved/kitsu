@@ -1037,8 +1037,15 @@ impl<'a> Host<'a> {
             (_, None) => String::new(),
         };
         if why == Some(Stop::Held) {
+            // On Windows what sh started can't be found once sh is gone
+            // (see `kill_group`), so don't say it was stopped.
+            let fate = if cfg!(unix) {
+                "they were stopped"
+            } else {
+                "they may still be running (on Windows Kitsu can't find them once sh has exited); their output is no longer read"
+            };
             text.push_str(&format!(
-                "[kitsu: sh exited, but processes it started kept its output open; they were stopped after {}s]\n",
+                "[kitsu: sh exited, but processes it started kept its output open; after {}s {fate}]\n",
                 DRAIN.as_secs()
             ));
         }

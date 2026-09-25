@@ -957,9 +957,15 @@ mod tests {
 
     #[test]
     fn never_auto_grants_a_standing_permission() {
-        let wt = Path::new("/w");
+        // Absolute on this platform: `C:/w` on Windows.
+        let (wt, file) = if cfg!(windows) {
+            ("C:/w", "C:/w/a.rs")
+        } else {
+            ("/w", "/w/a.rs")
+        };
+        let wt = Path::new(wt);
         let only_always = json!({
-            "toolCall": { "kind": "edit", "title": "x", "locations": [{ "path": "/w/a.rs" }] },
+            "toolCall": { "kind": "edit", "title": "x", "locations": [{ "path": file }] },
             "options": [{ "optionId": "always", "kind": "allow_always", "name": "Always" }, { "optionId": "no", "kind": "reject_once", "name": "No" }]
         });
         assert!(matches!(
@@ -971,7 +977,7 @@ mod tests {
             Decision::Human
         ));
         let both = json!({
-            "toolCall": { "kind": "edit", "title": "x", "locations": [{ "path": "/w/a.rs" }] },
+            "toolCall": { "kind": "edit", "title": "x", "locations": [{ "path": file }] },
             "options": [{ "optionId": "always", "kind": "allow_always" }, { "optionId": "once", "kind": "allow_once" }]
         });
         assert!(matches!(decide(Policy::Ask, &both, wt), Decision::Answer(o, _) if o == "once"));
