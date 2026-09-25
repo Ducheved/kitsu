@@ -19,6 +19,7 @@
 pub mod brain;
 pub mod context;
 pub mod host;
+pub mod loops;
 pub mod protocol;
 pub mod provider;
 pub mod tools;
@@ -108,6 +109,11 @@ pub async fn drive(
         match ev {
             Ev::Brain(end) => break end,
             Ev::Request((line, back)) => {
+                // A stop that landed while the host was busy: the brain sees
+                // it before it can send another model request.
+                if store.run(id)?.state == RunState::Stopping {
+                    let _ = cancel_tx.send(true);
+                }
                 let reply = host.serve(&line, wake).await;
                 let _ = back.send(reply);
             }

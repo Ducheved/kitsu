@@ -84,6 +84,8 @@ async fn drive(
     // Set after the provider said the last request didn't fit: compact
     // harder and retry once; a second overflow in a row ends the run.
     let mut overflowed = false;
+    let mut loops = super::loops::Detector::default();
+    let mut tree = String::new();
 
     loop {
         if *cancel.borrow() {
@@ -93,7 +95,28 @@ async fn drive(
         // are the ones that never got a result; the host settles them.
         for c in conv.pending() {
             let r = call_tool(link, &c, None, false).await?;
-            conv.set_result(&c.id, r.text);
+            if let Some(t) = &r.tree {
+                tree = t.clone();
+            }
+            let mut text = r.text;
+            match loops.observe(&c.name, &c.arguments, &tree) {
+                Some(1) => {
+                    append(
+                        link,
+                        "loop.signal",
+                        json!({ "call": c.id, "n": 1, "note": super::loops::WARNING }),
+                    )
+                    .await?;
+                    text = format!("{text}\n{}", super::loops::WARNING);
+                }
+                Some(n) => {
+                    append(link, "loop.signal", json!({ "call": c.id, "n": n })).await?;
+                    conv.set_result(&c.id, text);
+                    return Ok(stop(link, "doom_loop").await);
+                }
+                None => {}
+            }
+            conv.set_result(&c.id, text);
             if let Some(stop) = r.stop {
                 return Ok(End::Stopped(stop));
             }
@@ -236,6 +259,7 @@ async fn drive(
 struct ToolResult {
     text: String,
     stop: Option<String>,
+    tree: Option<String>,
 }
 
 async fn call_tool(
@@ -260,6 +284,7 @@ async fn call_tool(
     Ok(ToolResult {
         text,
         stop: r["_meta"]["kitsu/stop"].as_str().map(str::to_string),
+        tree: r["_meta"]["kitsu/tree"].as_str().map(str::to_string),
     })
 }
 

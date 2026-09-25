@@ -131,6 +131,14 @@ impl<'a> Host<'a> {
                 if let Some(s) = &self.stop {
                     v["_meta"]["kitsu/stop"] = json!(s);
                 }
+                // The tree after anything that can change files: the brain's
+                // measure of progress.
+                let name = req.params["name"].as_str().unwrap_or("");
+                if tools::effect(name) != Effect::None
+                    && let Ok(t) = Git::new(&self.worktree).worktree_tree(&self.ws.scratch())
+                {
+                    v["_meta"]["kitsu/tree"] = json!(t);
+                }
                 v
             }),
             protocol::STOP => {
@@ -357,6 +365,9 @@ impl<'a> Host<'a> {
             Err(Failure::Cancelled(e)) => (e, true, "cancelled"),
         };
         let text = tools::bounded(text);
+        if outcome == "cancelled" {
+            self.stop.get_or_insert_with(|| "cancelled".into());
+        }
         self.end(&call, &name, outcome, is_error, &text, implicit, turn)?;
         let _ = self.store.append(
             Some(&self.run),

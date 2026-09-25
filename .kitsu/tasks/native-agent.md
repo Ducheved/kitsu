@@ -20,10 +20,14 @@ settled from what was recorded before it ran (a write: applied or not by
 the file's hash; a command: unknown, never re-run), read-only calls just
 run again. Budgets count per run.
 
-Still to do, each with a scripted-stub test that fails without it:
-- Doom-loop signal: the same call three times in eight with no change to
-  the tree warns, a second signal stops.
-- Cancel during a long shell command; confinement e2e (symlink escape);
-  rate-limit and 5xx retries.
-- A live comparison on OpenRouter once the key reaches a session: same
-  tasks, this loop against Claude Code, verified runs and cost.
+Also in: the loop signal (the same call three times in the last eight
+with the files unchanged warns once, a second signal stops as
+doom_loop); cancel kills a running command and ends the run cancelled;
+429/5xx retried with backoff up to five attempts, 401 not at all; paths
+confined to the worktree, a symlink made with shell included.
+
+Still to do:
+- A live comparison on OpenRouter once the key reaches a session: the
+  same tasks with this loop and with Claude Code, verified runs and cost.
+- Anthropic Messages as a second provider, when someone needs it.
+- A cloud brain over WSS (the host stays local), when someone needs it.

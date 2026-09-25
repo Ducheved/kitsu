@@ -88,6 +88,7 @@ pub fn fold(entries: &[Value]) -> Conversation {
     let mut conv = Conversation::default();
     let mut results: BTreeMap<String, String> = BTreeMap::new();
     let mut elided: BTreeMap<String, String> = BTreeMap::new();
+    let mut notes: BTreeMap<String, String> = BTreeMap::new();
     for e in entries {
         let body = &e["body"];
         match e["kind"].as_str().unwrap_or("") {
@@ -126,6 +127,11 @@ pub fn fold(entries: &[Value]) -> Conversation {
                     }
                 }
             }
+            "loop.signal" => {
+                if let (Some(c), Some(n)) = (body["call"].as_str(), body["note"].as_str()) {
+                    notes.insert(c.to_string(), n.to_string());
+                }
+            }
             "ctx.compacted" => {
                 conv.compactions += 1;
                 for x in body["elided"].as_array().into_iter().flatten() {
@@ -145,7 +151,10 @@ pub fn fold(entries: &[Value]) -> Conversation {
     }
     for s in &mut conv.steps {
         for c in &mut s.calls {
-            c.result = results.remove(&c.id);
+            c.result = results.remove(&c.id).map(|r| match notes.remove(&c.id) {
+                Some(n) => format!("{r}\n{n}"),
+                None => r,
+            });
             c.elided = elided.remove(&c.id);
         }
     }

@@ -720,3 +720,179 @@ fn resume_is_only_for_kitsus_own_loop() {
         String::from_utf8_lossy(&o.stderr)
     );
 }
+
+#[test]
+fn going_in_circles_is_warned_then_stopped() {
+    let read = json!({ "tool": "read_file", "args": { "path": "payments.py" } });
+    let grep = json!({ "tool": "grep", "args": { "pattern": "uuid" } });
+    let script = json!([read, read, read, { "tool": "grep", "args": { "pattern": "uuid" }, "expect": "third identical call" }, grep, grep, { "text": "unreachable" }]);
+    let env = Env::new("loop", &script, "");
+    assert!(env.run("rn7", &[]).status.success());
+    assert_eq!(
+        stop_reason(&env, "rn7"),
+        (RunState::Finished, Some("doom_loop".into()))
+    );
+    let signals: Vec<Value> = env
+        .events("rn7")
+        .into_iter()
+        .filter(|(k, _)| k == "loop.signal")
+        .map(|(_, b)| b)
+        .collect();
+    assert_eq!(
+        signals.iter().map(|s| s["n"].as_u64()).collect::<Vec<_>>(),
+        [Some(1), Some(2)]
+    );
+    assert_eq!(env.requests().len(), 6);
+}
+
+#[test]
+fn the_same_check_after_each_edit_is_progress_not_a_loop() {
+    let old = "\"\"\"Charges a card through an upstream payment API.\"\"\"";
+    let check = json!({ "tool": "run_check", "args": { "name": "retries" } });
+    let edit = |n: u32| json!({ "tool": "edit_file", "args": { "path": "payments.py", "old": old, "new": format!("{old}\n# try {n}") } });
+    let script = json!([check, edit(1), check, edit(2), check, { "tool": "finish", "args": { "outcome": "blocked", "summary": "enough" } }]);
+    let env = Env::new("progress", &script, "");
+    assert!(env.run("rn8", &[]).status.success());
+    assert_eq!(
+        stop_reason(&env, "rn8"),
+        (RunState::Finished, Some("blocked".into()))
+    );
+    assert!(env.events("rn8").iter().all(|(k, _)| k != "loop.signal"));
+}
+
+#[test]
+fn rate_limits_and_server_errors_are_retried_a_bounded_number_of_times() {
+    let script = json!([
+        { "status": 429, "retry_after": 0 },
+        { "status": 503 },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "ok" } },
+    ]);
+    let env = Env::new("retry", &script, "");
+    assert!(env.run("rn9", &[]).status.success());
+    assert_eq!(
+        stop_reason(&env, "rn9"),
+        (RunState::Finished, Some("blocked".into()))
+    );
+    let errors: Vec<Value> = env
+        .events("rn9")
+        .into_iter()
+        .filter(|(k, _)| k == "model.error")
+        .map(|(_, b)| b)
+        .collect();
+    assert_eq!(
+        errors
+            .iter()
+            .map(|e| e["class"].as_str())
+            .collect::<Vec<_>>(),
+        [Some("rate_limited"), Some("transient")]
+    );
+
+    let env = Env::new(
+        "retry5",
+        &json!([{ "status": 500 }, { "status": 500 }, { "status": 500 }, { "status": 500 }, { "status": 500 }, { "text": "unreachable" }]),
+        "",
+    );
+    assert!(
+        !env.run("rn10", &[]).status.success(),
+        "a failed run exits non-zero"
+    );
+    let r = env.store().run("rn10").expect("run");
+    assert_eq!(
+        r.state,
+        RunState::Failed,
+        "five failures in a row end the run"
+    );
+    assert!(
+        r.detail.as_deref().unwrap_or("").contains("HTTP 500"),
+        "{:?}",
+        r.detail
+    );
+    assert_eq!(env.requests().len(), 5);
+
+    let env = Env::new(
+        "fatal",
+        &json!([{ "status": 401 }, { "text": "unreachable" }]),
+        "",
+    );
+    assert!(!env.run("rn11", &[]).status.success());
+    assert_eq!(
+        env.store().run("rn11").expect("run").state,
+        RunState::Failed
+    );
+    assert_eq!(env.requests().len(), 1, "a bad key isn't retried");
+}
+
+#[test]
+fn stop_kills_a_long_command_and_ends_the_run_cancelled() {
+    let script = json!([{ "tool": "shell", "args": { "command": "sleep 30; echo late > late.txt" } }, { "text": "unreachable" }]);
+    let env = Env::new("cancel", &script, "");
+    let mut child = env
+        .cmd(&[
+            "run",
+            "bounded-retries",
+            "--agent",
+            "kitsu",
+            "--id",
+            "rn12",
+            "-q",
+            "--policy",
+            "auto",
+        ])
+        .spawn()
+        .expect("spawn");
+    let t0 = std::time::Instant::now();
+    while !env
+        .events("rn12")
+        .iter()
+        .any(|(k, b)| k == "tool.begin" && b["tool"] == "shell")
+    {
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(20),
+            "the command never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    env.ok(&["stop", "rn12"]);
+    let status = child.wait().expect("wait");
+    assert!(status.success());
+    assert!(
+        t0.elapsed() < std::time::Duration::from_secs(15),
+        "stopped promptly"
+    );
+    assert_eq!(
+        stop_reason(&env, "rn12"),
+        (RunState::Finished, Some("cancelled".into()))
+    );
+    let end = env
+        .events("rn12")
+        .into_iter()
+        .find(|(k, b)| k == "tool.end" && b["tool"] == "shell")
+        .expect("end");
+    assert_eq!(end.1["outcome"], "cancelled");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!env.repo.join(".git/kitsu/worktrees/rn12/late.txt").exists());
+}
+
+#[test]
+fn paths_outside_the_worktree_are_refused_symlinks_included() {
+    let script = json!([
+        { "tool": "write_file", "args": { "path": "../escape.txt", "content": "x" } },
+        { "tool": "write_file", "args": { "path": ".git/config", "content": "x" } },
+        { "tool": "shell", "args": { "command": "ln -s /tmp out" } },
+        { "tool": "write_file", "args": { "path": "out/kitsu-escape.txt", "content": "x" } },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "done probing" }, "expect": "resolves outside your worktree" },
+    ]);
+    let env = Env::new("confine", &script, "");
+    assert!(env.run("rn13", &["--policy", "auto"]).status.success());
+    let ends: Vec<Value> = env
+        .events("rn13")
+        .into_iter()
+        .filter(|(k, _)| k == "tool.end")
+        .map(|(_, b)| b)
+        .collect();
+    assert_eq!(ends[0]["outcome"], "invalid");
+    assert_eq!(ends[1]["outcome"], "invalid");
+    assert_eq!(ends[3]["outcome"], "invalid");
+    assert!(!env.repo.join(".git/kitsu/worktrees/escape.txt").exists());
+    assert!(!Path::new("/tmp/kitsu-escape.txt").exists());
+}

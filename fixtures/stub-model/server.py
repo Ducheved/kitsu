@@ -23,6 +23,7 @@ A script is a JSON list, one entry per model request, played in order:
   {"tools": [{"tool": ..., "args": ...}, ...]}              several at once
   {"text": "Done."}                                         a final answer
   {"overflow": true}                                        a context-overflow error
+  {"status": 429, "retry_after": 0}                         an HTTP error (429, 500, 401...)
   {"expect": "substring"}  (on any entry) the request must contain it, or 500
 Optional "usage": {"input": N, "output": M} on any entry. Past the end of the
 script every request gets {"text": "script finished"}.
@@ -102,6 +103,8 @@ def scripted(text):
     usage = e.get("usage", {})
     if e.get("overflow"):
         return ("overflow",)
+    if "status" in e:
+        return ("http", e["status"], e.get("retry_after"))
     if "tool" in e:
         return ("tools", [(e["tool"], e.get("args", {}))], usage)
     if "tools" in e:
@@ -159,6 +162,17 @@ class Handler(BaseHTTPRequestHandler):
         if reply[0] == "error":
             self.log(path, "error", body)
             self._json(500, {"error": {"message": reply[1], "type": "script_error"}})
+            return
+        if reply[0] == "http":
+            self.log(path, f"http {reply[1]}", body)
+            raw = json.dumps({"error": {"message": f"scripted HTTP {reply[1]}", "type": "stub"}}).encode()
+            self.send_response(reply[1])
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(raw)))
+            if reply[2] is not None:
+                self.send_header("retry-after", str(reply[2]))
+            self.end_headers()
+            self.wfile.write(raw)
             return
         if reply[0] == "overflow":
             self.log(path, "overflow", body)
