@@ -934,8 +934,13 @@ impl<'a> Host<'a> {
         wake: &mut Wake,
     ) -> std::result::Result<String, Failure> {
         let limits = crate::agents::limits().map_err(|e| Failure::Failed(e.to_string()))?;
+        let sh = crate::proc::sh().map_err(Failure::Failed)?;
         let (argv, _) = crate::agents::limited(
-            &["sh".to_string(), "-c".to_string(), command.to_string()],
+            &[
+                sh.to_string_lossy().into_owned(),
+                "-c".to_string(),
+                command.to_string(),
+            ],
             limits,
             &crate::agents::allowed_cpus(),
             crate::agents::on_path,
@@ -1442,14 +1447,13 @@ enum Stop {
 }
 
 /// Kill what is left of a process group whose leader was already reaped.
+/// Unix only: on Windows the leader's number may already belong to another
+/// process, and what it started can't be found from it; what is left there
+/// keeps running, but its output is no longer read.
 async fn kill_group(group: Option<u32>) {
     #[cfg(unix)]
     if let Some(pid) = group {
-        let _ = tokio::process::Command::new("kill")
-            .args(["-KILL", "--", &format!("-{pid}")])
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        crate::proc::kill_tree(pid).await;
     }
     #[cfg(not(unix))]
     let _ = group;

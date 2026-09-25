@@ -743,13 +743,12 @@ async fn shut_down(child: &mut tokio::process::Child) {
     }
 }
 
+/// The child and everything it started: its process group on Unix, its
+/// process tree on Windows (`proc::kill_tree`). `id()` is `None` once the
+/// child was reaped, and then there is nothing left to find the rest by.
 pub(crate) async fn kill_group(child: &mut tokio::process::Child) {
-    #[cfg(unix)]
     if let Some(pid) = child.id() {
-        let _ = Command::new("kill")
-            .args(["-KILL", "--", &format!("-{pid}")])
-            .status()
-            .await;
+        crate::proc::kill_tree(pid).await;
     }
     let _ = child.kill().await;
 }

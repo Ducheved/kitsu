@@ -629,6 +629,32 @@ fn untrusted_repositories_do_not_run_anything() {
 }
 
 #[test]
+fn a_check_with_no_shell_to_run_it_is_an_error_never_a_pass() {
+    let env = Env::new("nosh");
+    let o = env
+        .cmd(&["--json", "check"])
+        .env("KITSU_SH", env.root.join("no-such-sh"))
+        .output()
+        .expect("check");
+    assert_eq!(o.status.code(), Some(2), "not all pass");
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&o.stdout).expect("json");
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows.iter().all(|r| r["outcome"] == "error"), "{rows:?}");
+    let log = Workspace::discover(&env.repo)
+        .expect("ws")
+        .blobs()
+        .get(rows[0]["log"].as_str().expect("log"))
+        .expect("blob");
+    assert!(
+        String::from_utf8_lossy(&log).contains("KITSU_SH is"),
+        "{}",
+        String::from_utf8_lossy(&log)
+    );
+    let show = env.ok(&["show", "bounded-retries"]);
+    assert!(!show.contains("pass"), "{show}");
+}
+
+#[test]
 fn a_broken_rule_file_blocks_accept_and_is_loud_in_the_brief() {
     let env = Env::new("broken");
     env.run_with(&agent("good"), "rgood", &[]);
