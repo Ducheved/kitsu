@@ -328,37 +328,7 @@ pub struct Intent {
 impl Intent {
     /// Read `.kitsu/` from a working directory.
     pub fn load_dir(root: &Path) -> Result<Intent> {
-        let mut files = Vec::new();
-        let base = root.join(DIR);
-        if !base.exists() {
-            return Ok(Intent::default());
-        }
-        let config = base.join("kitsu.toml");
-        if config.exists() {
-            let bytes =
-                std::fs::read(&config).map_err(|e| Error::io(config.display().to_string(), e))?;
-            files.push((CONFIG.to_string(), bytes));
-        }
-        // `invariants` is read only so a leftover file is reported.
-        for sub in Kind::ALL.iter().map(|k| k.dir()).chain(["invariants"]) {
-            let dir = base.join(sub);
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries {
-                let entry = entry.map_err(|e| Error::io(dir.display().to_string(), e))?;
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if !name.ends_with(".md")
-                    || !entry.file_type().map(|t| t.is_file()).unwrap_or(false)
-                {
-                    continue;
-                }
-                let bytes = std::fs::read(entry.path())
-                    .map_err(|e| Error::io(entry.path().display().to_string(), e))?;
-                files.push((format!("{DIR}/{sub}/{name}"), bytes));
-            }
-        }
-        Ok(Intent::from_files(files))
+        Ok(Intent::from_files(dir_files(root)?))
     }
 
     /// Build from `(repo-relative path, contents)` pairs. Used for both a
@@ -761,6 +731,41 @@ impl Intent {
     }
 }
 
+/// The `(repo-relative path, contents)` pairs `Intent::load_dir` parses.
+/// Exposed so an edit can be checked by parsing the result before it is
+/// written.
+pub fn dir_files(root: &Path) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut files = Vec::new();
+    let base = root.join(DIR);
+    if !base.exists() {
+        return Ok(files);
+    }
+    let config = base.join("kitsu.toml");
+    if config.exists() {
+        let bytes =
+            std::fs::read(&config).map_err(|e| Error::io(config.display().to_string(), e))?;
+        files.push((CONFIG.to_string(), bytes));
+    }
+    // `invariants` is read only so a leftover file is reported.
+    for sub in Kind::ALL.iter().map(|k| k.dir()).chain(["invariants"]) {
+        let dir = base.join(sub);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| Error::io(dir.display().to_string(), e))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".md") || !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let bytes = std::fs::read(entry.path())
+                .map_err(|e| Error::io(entry.path().display().to_string(), e))?;
+            files.push((format!("{DIR}/{sub}/{name}"), bytes));
+        }
+    }
+    Ok(files)
+}
+
 /// A memory note: protected like every `.kitsu/` file, but a proposal of
 /// something learned rather than a change to what is required. Review
 /// shows the two differently so reviewers don't learn to wave rule changes
@@ -846,6 +851,144 @@ pub fn set_state(text: &str, value: &str) -> Result<String, String> {
         new_front.push_str(&format!("state = \"{value}\"\n"));
     }
     Ok(format!("{}{}{}", &text[..start], new_front, &text[end..]))
+}
+
+/// Set `key = [..]` in a file's front matter to `values`, keeping every
+/// other byte of the file as it was. A multi-line array is replaced whole;
+/// a comment on the same line as the value goes with it. A key that isn't
+/// there is added only when there is something to say, before the first
+/// table header so it stays top-level. Used when a person edits a task's
+/// `after`, `checks` or `scope` from the UI.
+pub fn set_list(text: &str, key: &str, values: &[String]) -> Result<String, String> {
+    let (front, _) = split_front_matter(text)?;
+    let start = front.as_ptr() as usize - text.as_ptr() as usize;
+    let end = start + front.len();
+    let (entries, tables_at) = front_entries(front);
+    let list = values
+        .iter()
+        .map(|v| toml::Value::String(v.clone()).to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (at, eol) = match entries.iter().find(|(k, _)| k == key) {
+        Some((_, range)) => {
+            let old = &front[range.clone()];
+            let eol = if old.ends_with("\r\n") {
+                "\r\n"
+            } else if old.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
+            (range.clone(), eol)
+        }
+        None if values.is_empty() => return Ok(text.to_string()),
+        None => {
+            let eol = if front.contains("\r\n") { "\r\n" } else { "\n" };
+            (tables_at..tables_at, eol)
+        }
+    };
+    let line = format!("{key} = [{list}]{eol}");
+    let new_front = format!("{}{line}{}", &front[..at.start], &front[at.end..]);
+    Ok(format!("{}{new_front}{}", &text[..start], &text[end..]))
+}
+
+/// Top-level `key = value` entries of TOML front matter, each as the byte
+/// range from the start of its line to past the newline that ends its value
+/// (so a multi-line array is one entry), plus where the first table header
+/// starts (the end when there is none). Strings and comments are skipped,
+/// so a `[` or newline inside them doesn't end anything early.
+fn front_entries(front: &str) -> (Vec<(String, std::ops::Range<usize>)>, usize) {
+    let b = front.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let line_end = |mut i: usize| {
+        while i < b.len() && b[i] != b'\n' {
+            i += 1;
+        }
+        (i + 1).min(b.len())
+    };
+    while i < b.len() {
+        let line_start = i;
+        while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
+            i += 1;
+        }
+        match b.get(i) {
+            None => break,
+            Some(b'[') => return (out, line_start),
+            Some(b'#' | b'\n' | b'\r') => {
+                i = line_end(i);
+                continue;
+            }
+            _ => {}
+        }
+        let key_start = i;
+        while i < b.len() && b[i] != b'=' && b[i] != b'\n' {
+            i += 1;
+        }
+        if b.get(i) != Some(&b'=') {
+            i = line_end(i);
+            continue;
+        }
+        let key = front[key_start..i].trim().to_string();
+        i += 1;
+        let mut depth = 0i32;
+        while i < b.len() {
+            match b[i] {
+                b'"' | b'\'' => {
+                    i = skip_toml_string(b, i);
+                    continue;
+                }
+                b'[' | b'{' => depth += 1,
+                b']' | b'}' => depth -= 1,
+                b'#' => {
+                    while i < b.len() && b[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                b'\n' if depth <= 0 => {
+                    i += 1;
+                    break;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out.push((key, line_start..i));
+    }
+    (out, b.len())
+}
+
+/// Index just past the TOML string starting at `i` (basic, literal, or
+/// either multi-line form). An unclosed string runs to the end.
+fn skip_toml_string(b: &[u8], i: usize) -> usize {
+    let q = b[i];
+    let triple = b.len() >= i + 3 && b[i + 1] == q && b[i + 2] == q;
+    let mut j = if triple { i + 3 } else { i + 1 };
+    while j < b.len() {
+        if q == b'"' && b[j] == b'\\' {
+            j += 2;
+            continue;
+        }
+        if b[j] == q {
+            if !triple {
+                return j + 1;
+            }
+            if b.len() >= j + 3 && b[j + 1] == q && b[j + 2] == q {
+                // `"""a""""` closes on the last three quotes.
+                let mut k = j + 3;
+                while k < b.len() && b[k] == q && k < j + 5 {
+                    k += 1;
+                }
+                return k;
+            }
+        }
+        if !triple && b[j] == b'\n' {
+            return j;
+        }
+        j += 1;
+    }
+    b.len()
 }
 
 fn first_heading(body: &str) -> Option<String> {
@@ -1225,6 +1368,77 @@ mod tests {
             set_state(t, "done").expect("edit"),
             "+++\nstate = \"done\"\n+++\n"
         );
+    }
+
+    #[test]
+    fn set_list_rewrites_only_that_key() {
+        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // One-line value, other keys and the body untouched byte for byte.
+        let t = "+++\ntitle = \"x [y]\"   # keep = me\nscope = [\"a/**\"]\nafter = [\"b\"]\n+++\nbody\nafter = [\"not front matter\"]\n";
+        assert_eq!(
+            set_list(t, "after", &v(&["b", "c"])).expect("edit"),
+            "+++\ntitle = \"x [y]\"   # keep = me\nscope = [\"a/**\"]\nafter = [\"b\", \"c\"]\n+++\nbody\nafter = [\"not front matter\"]\n"
+        );
+        // A multi-line array with comments and brackets inside strings is one
+        // entry; the next key survives.
+        let t = "+++\nchecks = [\n  \"test\", # the suite\n  \"lint]\",\n]\nafter = []\n+++\n";
+        assert_eq!(
+            set_list(t, "checks", &v(&["fmt"])).expect("edit"),
+            "+++\nchecks = [\"fmt\"]\nafter = []\n+++\n"
+        );
+        // A multi-line string that mentions the key is not the key.
+        let t = "+++\ntitle = \"\"\"\nafter = [\"x\"]\n\"\"\"\n+++\n";
+        assert_eq!(
+            set_list(t, "after", &v(&["y"])).expect("edit"),
+            "+++\ntitle = \"\"\"\nafter = [\"x\"]\n\"\"\"\nafter = [\"y\"]\n+++\n"
+        );
+        // Missing key: added only if there's something to add.
+        let t = "+++\ntitle = \"x\"\n+++\nbody\n";
+        assert_eq!(set_list(t, "after", &[]).expect("edit"), t);
+        assert_eq!(
+            set_list(t, "after", &v(&["a"])).expect("edit"),
+            "+++\ntitle = \"x\"\nafter = [\"a\"]\n+++\nbody\n"
+        );
+        assert_eq!(
+            set_list("+++\n+++\n", "scope", &v(&["src/\"q\"/**"])).expect("edit"),
+            "+++\nscope = ['src/\"q\"/**']\n+++\n"
+        );
+        // Emptying keeps the key; CRLF files stay CRLF.
+        let t = "+++\r\ntitle = \"x\"\r\nafter = [\"a\"]\r\n+++\r\nbody\r\n";
+        assert_eq!(
+            set_list(t, "after", &[]).expect("edit"),
+            "+++\r\ntitle = \"x\"\r\nafter = []\r\n+++\r\nbody\r\n"
+        );
+        // A table header ends the top level: new keys go before it.
+        let t = "+++\ntitle = \"x\"\n[extra]\nafter = 1\n+++\n";
+        assert_eq!(
+            set_list(t, "after", &v(&["a"])).expect("edit"),
+            "+++\ntitle = \"x\"\nafter = [\"a\"]\n[extra]\nafter = 1\n+++\n"
+        );
+        assert!(set_list("no front matter", "after", &[]).is_err());
+    }
+
+    #[test]
+    fn set_list_output_parses_to_what_was_asked() {
+        let t = "+++\ntitle = \"Retry\"\nstate = \"open\"\nscope = [\"src/**\"]\nchecks = [\n  \"test\",\n]\n+++\n# Retry\n\nWhy.\n";
+        let mut out = set_list(t, "after", &["b".into()]).expect("after");
+        out = set_list(&out, "checks", &["test".into(), "lint".into()]).expect("checks");
+        out = set_list(&out, "scope", &[]).expect("scope");
+        let intent = Intent::from_files(files(&[
+            (
+                CONFIG,
+                "[checks.test]\nrun = \"t\"\n[checks.lint]\nrun = \"l\"\n",
+            ),
+            (".kitsu/tasks/a.md", &out),
+            (".kitsu/tasks/b.md", "+++\n+++\n"),
+        ]));
+        assert!(intent.problems.is_empty(), "{:?}", intent.problems);
+        let a = &intent.tasks["a"];
+        assert_eq!(a.after, ["b"]);
+        assert_eq!(a.checks, ["test", "lint"]);
+        assert!(a.scope.is_everything());
+        assert_eq!(a.title, "Retry");
+        assert_eq!(a.body, "# Retry\n\nWhy.\n");
     }
 
     #[test]

@@ -176,6 +176,25 @@ export interface TaskDetail {
   dirty_checkout: boolean;
 }
 
+/** One task as the Plan view edits it (`plan` command). */
+export interface PlanTask {
+  id: string;
+  title: string;
+  state: "open" | "done" | "dropped";
+  scope: string[];
+  checks: string[];
+  after: string[];
+  path: string;
+  /** Content id of the file; pass it back to `update_task`. */
+  version: string;
+}
+
+export interface Plan {
+  tasks: PlanTask[];
+  /** Every check defined in kitsu.toml, by name. */
+  checks: string[];
+}
+
 export interface RunDetail {
   run: Run;
   events: RunEvent[];

@@ -11,6 +11,7 @@ export type View =
   | { kind: "home" }
   | { kind: "task"; id: string }
   | { kind: "rules" }
+  | { kind: "plan" }
   | { kind: "file"; path: string; line?: number }
   | { kind: "diff"; run: string; path: string };
 
@@ -31,12 +32,14 @@ interface Prefs {
   strip: boolean;
   /** Fox paw prints in the corner of the main pane. */
   paws: boolean;
+  /** Plan view: done tasks fade back. */
+  planDimDone: boolean;
 }
 
 const PREFS_KEY = "kitsu.prefs";
 
 function loadPrefs(): Prefs {
-  const d: Prefs = { vim: true, agent: "claude", policy: "ask", showDone: false, lang: "system", theme: "system", layout: "adaptive", tree: true, strip: true, paws: true };
+  const d: Prefs = { vim: true, agent: "claude", policy: "ask", showDone: false, lang: "system", theme: "system", layout: "adaptive", tree: true, strip: true, paws: true, planDimDone: true };
   try {
     return { ...d, ...JSON.parse(localStorage.getItem(PREFS_KEY) ?? "{}") };
   } catch {
