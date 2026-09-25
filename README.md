@@ -238,7 +238,7 @@ Verified here means an automated test or a measurement in this repo does it.
 | Desktop app on Linux (WebKitGTK): open repo, review, accept with `a`, start a run | driven by hand under Xvfb |
 | UI flows and screens | Chromium on fixture data |
 | Kitsu's own loop: fixing the fixture task, false done ×3, compaction at the threshold and after an overflow, crash-and-resume at three points, loop signal, cancel, retries, path confinement, the key never written | 15 end-to-end tests against a scripted model server |
-| Kitsu's own loop on a live model | **once**: the fixture task on OpenRouter; prompt caching measured (91–96% of the prompt from cache on turns 2–5, half the cost) |
+| Kitsu's own loop on a live model | **once**: the fixture task on OpenRouter; prompt caching measured (71–92% of the prompt from cache on turns 2–5, half the cost; one run, not repeated) |
 | **Real agents** (Claude, Codex, Gemini adapters) | **partly**: Claude Code through `kitsu run` against a stub model (compaction probe) |
 | **How good it is on real tasks**, own loop vs Codex vs OpenCode | **not measured yet**; an eval suite with held-out checks is in progress ([roadmap](docs/roadmap.md)) |
 | **macOS and Windows** | **not built or run yet**. Stop on Windows falls back to a 1 s poll; orphan cleanup is Linux-only |

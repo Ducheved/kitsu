@@ -19,7 +19,7 @@ run), the brief (same for the whole run) and the message right before the
 ledger (the conversation so far). The ledger is re-rendered every request
 and stays unmarked after it, as `context` already arranges.
 
-Measured on the same fixture and model: turns 2–5 read 91–96% of the prompt
+Measured on the same fixture and model: turns 2–5 read 71–92% of the prompt
 from cache, and the run cost $0.032 instead of $0.064.
 
 Not yet measured: a hit across runs on the harness and tool list (needs two
