@@ -391,6 +391,8 @@ fn killing_the_run_process_leaves_an_honest_interrupted_run() {
             .map(|r| r.state == RunState::Running && r.pid.is_some())
             .unwrap_or(false)
     });
+    // Orphan cleanup is Linux-only (README), so only Linux looks at it.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     let agent_pid = env.store().run("rkill").expect("run").pid.expect("pid");
     // Give the agent a moment to write its file.
     std::thread::sleep(Duration::from_millis(300));

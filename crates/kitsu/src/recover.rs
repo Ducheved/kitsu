@@ -175,6 +175,8 @@ pub fn recover(ws: &Workspace, store: &Store) -> Result<Report> {
     Ok(report)
 }
 
+// Only Linux can prove who a pid is (see `reap`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum Reaped {
     Killed,
     Gone,
