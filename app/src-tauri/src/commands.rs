@@ -16,7 +16,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use kitsu::brief::{self, Context};
-use kitsu::check::{CheckRun, status_at};
+use kitsu::check::{CheckRun, receipt, status_at};
 use kitsu::digest;
 use kitsu::integrate::{self, AcceptOptions};
 use kitsu::intent::{self, Intent, Kind, QuestionState};
@@ -835,7 +835,9 @@ pub async fn rules(state: State<'_, AppState>, repo: String) -> R<Value> {
                     intent::DecisionState::Accepted => "accepted",
                     intent::DecisionState::Superseded => "superseded",
                 };
-                json!({ "id": d.id, "title": d.title, "state": st, "scope": d.scope.globs(), "rejected": d.rejected, "body": d.body, "path": d.source.path })
+                // Empty: nothing has to pass before a change under it lands; a note.
+                let enforced_by = kitsu::status::enforcing_checks(&intent, &d.scope);
+                json!({ "id": d.id, "title": d.title, "state": st, "scope": d.scope.globs(), "rejected": d.rejected, "body": d.body, "path": d.source.path, "enforced_by": enforced_by })
             })
             .collect();
         let questions: Vec<Value> = intent
@@ -847,7 +849,11 @@ pub async fn rules(state: State<'_, AppState>, repo: String) -> R<Value> {
             .config
             .checks
             .values()
-            .map(|c| -> R<Value> { Ok(json!({ "name": c.name, "run": c.run, "scope": c.scope.globs(), "guards": c.guards.globs(), "why": c.why, "status": status_at(&git, &store, c, &tree)? })) })
+            .map(|c| -> R<Value> {
+                let status = status_at(&git, &store, c, &tree)?;
+                let receipt = receipt(&store, &status)?;
+                Ok(json!({ "name": c.name, "run": c.run, "scope": c.scope.globs(), "guards": c.guards.globs(), "why": c.why, "status": status, "receipt": receipt }))
+            })
             .collect::<R<_>>()?;
         // Staleness against HEAD: uncommitted edits to anchors don't count
         // until committed, same as for runs.

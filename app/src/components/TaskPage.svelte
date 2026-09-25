@@ -272,7 +272,15 @@
       {#each constraints as c (c.kind + c.id)}
         <button class="c-row link-row" onclick={() => app.go({ kind: "rules" })}>
           <span class="c-kind">{kindLabel(c.kind)}</span>
-          <span class="c-text"><span class="c-title">{c.title}</span><span class="hint mono"> {c.id}</span><span class="why hint">{c.why}</span></span>
+          <span class="c-text">
+            <span class="c-title">{c.title}</span><span class="hint mono"> {c.id}</span><span class="why hint">{c.why}</span>
+            <!-- A rule a check enforces, or prose nobody is held to. -->
+            {#if c.enforced_by?.length}
+              <span class="why enforced">{t("told.enforcedBy", { checks: i18n.list(c.enforced_by) })}</span>
+            {:else if c.enforced_by}
+              <span class="why noted">{t("told.note")}</span>
+            {/if}
+          </span>
         </button>
       {/each}
       {#each detail.brief.problems as p (p)}
@@ -461,6 +469,14 @@
   }
   .why {
     font-size: 12.5px;
+  }
+  /* Enforced says a check must pass, not that it did: no green here. */
+  .enforced {
+    color: var(--muted);
+  }
+  .noted {
+    color: var(--warn);
+    font-style: italic;
   }
   .c-kind {
     flex: none;

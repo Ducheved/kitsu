@@ -9,7 +9,7 @@ export type Verdict = "verified" | "failing" | "unverified" | "empty" | "unknown
 export type Status =
   | { kind: "running"; run: string; agent: string; stopping: boolean }
   | { kind: "asking"; run: string; agent: string; asks: number }
-  | { kind: "review"; run: string; agent: string; verdict: Verdict; failing: string[] }
+  | { kind: "review"; run: string; agent: string; verdict: Verdict; failing: string[]; unguarded: string[]; receipts: Receipt[] }
   | { kind: "failed"; run: string; agent: string; detail: string }
   | { kind: "interrupted"; run: string; agent: string }
   | { kind: "blocked_by_question"; questions: string[] }
@@ -143,6 +143,40 @@ export interface Evidence {
   started_at: number;
 }
 
+/**
+ * What a check mark stands on: one recorded run of the command
+ * (kitsu::check::Receipt). A check is green only next to one of these.
+ */
+export interface Receipt {
+  check: string;
+  evidence: number;
+  command: string;
+  fingerprint: string;
+  tree: string;
+  outcome: Outcome;
+  exit_code: number | null;
+  duration_ms: number;
+  started_at: number;
+  run: string | null;
+  /** current: this tree. carried: another tree, nothing in the check's scope differs. stale: says nothing here. */
+  binding: "current" | "carried" | "stale";
+}
+
+/** A typed judgment from judge.rs: probabilities, never a receipt. */
+export interface Judgment {
+  id: number;
+  run: string | null;
+  purpose: string;
+  kind: string;
+  outcome: string;
+  /** Per question: `p_yes`, `choice` or `score` when answered; `unknown` (the reason) when not. */
+  answers: Record<string, { type?: string; p_yes?: number; choice?: string; score?: number; confidence?: number; unknown?: string; detail?: string } | undefined>;
+  reason: string | null;
+  model: string | null;
+  latency_ms: number;
+  created_at: number;
+}
+
 export type CheckStatus =
   | { status: "current"; outcome: Outcome; evidence: number }
   | { status: "carried"; outcome: Outcome; evidence: number; from_tree: string }
@@ -157,6 +191,8 @@ export interface BriefItem {
   path: string;
   content_id: string;
   why: string;
+  /** Decisions only: checks that must pass before a change under it lands. Empty: a note. */
+  enforced_by?: string[];
 }
 
 export interface Brief {
@@ -217,19 +253,26 @@ export interface Review {
   protected: string[];
   approval_token: string | null;
   checks: [string, CheckStatus][];
+  receipts: Receipt[];
+  /** Changed paths no required check looks at: unknown, never green. */
+  unguarded: string[];
+  /** The agent's own last word. A claim, not evidence. */
+  claim: string | null;
+  judgments: Judgment[];
 }
 
 export type Accepted =
-  | { result: "applied"; commit: string; closed_task: boolean; notes: string[] }
+  | { result: "applied"; commit: string; closed_task: boolean; notes: string[]; unguarded: string[] }
   | { result: "needs_approval"; paths: string[]; token: string }
   | { result: "conflict"; paths: string[] }
   | { result: "checks_failed"; failing: string[]; candidate: string };
 
 export interface Rules {
-  decisions: { id: string; title: string; state: string; scope: string[]; rejected: string[]; body: string; path: string }[];
+  /** `enforced_by` empty: no check has to pass before a change under it lands, so it is a note. */
+  decisions: { id: string; title: string; state: string; scope: string[]; rejected: string[]; body: string; path: string; enforced_by: string[] }[];
   questions: { id: string; title: string; open: boolean; blocks: string[]; answer: string | null; body: string; path: string }[];
   memory: MemoryNote[];
-  checks: { name: string; run: string; scope: string[]; guards: string[]; why: string | null; status: CheckStatus }[];
+  checks: { name: string; run: string; scope: string[]; guards: string[]; why: string | null; status: CheckStatus; receipt: Receipt | null }[];
 }
 
 export type MemoryKind = "fact" | "gotcha" | "convention" | "preference" | "lesson";

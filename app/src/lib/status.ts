@@ -1,7 +1,7 @@
 // Structured state from the Rust side, said in the person's language.
 
 import { i18n, t } from "./i18n/index.svelte";
-import type { CheckStatus, DigestItem, RunState, TaskView, Usage } from "./types";
+import type { CheckStatus, DigestItem, Receipt, RunState, TaskView, Usage } from "./types";
 
 export function statusText(v: TaskView): string {
   const s = v.status;
@@ -11,19 +11,22 @@ export function statusText(v: TaskView): string {
       return t(s.stopping ? "status.stopping" : "status.running", { agent: s.agent }) + more;
     case "asking":
       return t("status.asking", { agent: s.agent, n: s.asks });
-    case "review":
+    case "review": {
+      // Whatever the checks say, paths none of them look at stay unknown.
+      const unknown = s.unguarded?.length ? t("status.unguarded", { n: s.unguarded.length }) : "";
       switch (s.verdict) {
         case "verified":
-          return t("status.verified") + more;
+          return t("status.verified") + unknown + more;
         case "failing":
-          return t("status.failing", { checks: i18n.list(s.failing) }) + more;
+          return t("status.failing", { checks: i18n.list(s.failing) }) + unknown + more;
         case "unverified":
-          return t("status.unverified") + more;
+          return t("status.unverified") + unknown + more;
         case "empty":
           return t("status.empty", { agent: s.agent }) + more;
         default:
           return t("status.unknown") + more;
       }
+    }
     case "failed":
       return t("status.failed", { agent: s.agent, detail: s.detail });
     case "interrupted":
@@ -69,8 +72,37 @@ export function digestText(item: DigestItem): string {
   }
 }
 
-/** One word for a check's state, and how to color it. */
-export function checkWord(s: CheckStatus): { word: string; tone: "ok" | "bad" | "warn" | "dim"; hint?: string } {
+/** A green mark: it passed with exit code 0, on this tree or one its scope can't tell apart. */
+export function receiptPasses(r: Receipt | null | undefined): boolean {
+  return !!r && r.outcome === "pass" && r.exit_code === 0 && r.binding !== "stale";
+}
+
+/**
+ * One word for a check's state, and how to color it. Green only next to a
+ * receipt that passes: without one it's "no receipt", however the status reads.
+ */
+export function checkWord(s: CheckStatus, receipt: Receipt | null | undefined): { word: string; tone: "ok" | "bad" | "warn" | "dim"; hint?: string } {
+  const w = statusWord(s);
+  if (w.tone === "ok" && !receiptPasses(receipt)) return { word: t("check.noReceipt"), tone: "warn", hint: t("check.noReceiptHint") };
+  return w;
+}
+
+/** The receipt's facts in one short line: exit code, duration, tree, when. */
+export function receiptLine(r: Receipt): string {
+  return t("receipt.line", {
+    exit: r.exit_code == null ? t("receipt.noExit") : String(r.exit_code),
+    duration: duration(r.duration_ms),
+    tree: r.tree.slice(0, 8),
+    ago: i18n.ago(r.started_at),
+  });
+}
+
+/** The command as it ran, or its fingerprint when it's too long to read in a row. */
+export function receiptCommand(r: Receipt): { text: string; fingerprint: boolean } {
+  return r.command.length > 56 ? { text: r.fingerprint.slice(0, 12), fingerprint: true } : { text: r.command, fingerprint: false };
+}
+
+function statusWord(s: CheckStatus): { word: string; tone: "ok" | "bad" | "warn" | "dim"; hint?: string } {
   switch (s.status) {
     case "current":
       return s.outcome === "pass" ? { word: t("check.passes"), tone: "ok" } : { word: outcomeWord(s.outcome), tone: "bad" };

@@ -13,6 +13,8 @@ import type {
   BranchRow,
   CheckStatus,
   Evidence,
+  Judgment,
+  Receipt,
   Overview,
   Plan,
   Project,
@@ -75,7 +77,8 @@ interface Seed {
   checks: string[];
   /** Checks that guard a path: required for any task whose scope has it. */
   guards?: Record<string, string>;
-  rules: Omit<Rules, "questions">;
+  /** What the files say; `enforced_by` and receipts are derived, like the backend does. */
+  rules: { decisions: Omit<Rules["decisions"][number], "enforced_by">[]; memory: Rules["memory"]; checks: Omit<Rules["checks"][number], "receipt">[] };
   files: string[];
   diff: { old: string; new: string };
   branches: Omit<BranchRow, "run" | "task">[];
@@ -89,7 +92,9 @@ interface History {
   run: (partial: Partial<Run> & { id: string; task: string }) => Run;
   ev: (run: string, kind: string, body: unknown, at?: number) => void;
   ask: (a: Ask) => void;
-  evidence: (e: Omit<Evidence, "id">) => void;
+  /** `carried`: `tree` is an earlier one, and nothing in the check's scope changed since. */
+  evidence: (e: Omit<Evidence, "id">, carried?: boolean) => void;
+  judgment: (j: Omit<Judgment, "id">) => void;
   /** A scripted agent that keeps streaming while you watch. */
   live: (run: Run, script: { kind: string; body: unknown }[], every: number) => void;
 }
@@ -103,6 +108,28 @@ const agents = [
 ];
 
 const order = ["needs_you", "working", "ready", "waiting", "quiet"];
+
+// A stand-in for CheckDef::fingerprint: stable hex from the command.
+function fingerprint(s: string): string {
+  let h = 0x811c9dc5;
+  let out = "";
+  for (let round = 0; round < 2; round++)
+    for (const c of s + round) {
+      h ^= c.charCodeAt(0);
+      h = Math.imul(h, 0x01000193) >>> 0;
+      if (out.length < 16) out += (h & 0xff).toString(16).padStart(2, "0");
+    }
+  return out.padEnd(16, "0").slice(0, 16);
+}
+
+// kitsu::scope::glob_match: `**` any segments, `*` within one, `?` one character.
+function globMatch(glob: string, path: string): boolean {
+  const re = glob
+    .split("/")
+    .map((seg) => (seg === "**" ? "(?:[^/]+/)*" : seg.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]") + "/"))
+    .join("");
+  return new RegExp(`^${re}$`).test(path + "/");
+}
 const refused = (detail: string) => ({ kind: "invalid", message: `not saved, it would break the task files: ${detail}` });
 
 function makeRepo(id: string, seed: Seed) {
@@ -114,7 +141,9 @@ function makeRepo(id: string, seed: Seed) {
   const events: RunEvent[] = [];
   const asks: Ask[] = [];
   const evidence: Evidence[] = [];
-  const info = { id, root: seed.root, name: seed.name, branch: seed.branch, trusted: seed.trusted, initialized: seed.initialized ?? true };
+  const carried = new Map<number, string>();
+  const judgments: Judgment[] = [];
+  const info ={ id, root: seed.root, name: seed.name, branch: seed.branch, trusted: seed.trusted, initialized: seed.initialized ?? true };
   const changed = () => changedIn(id);
   let seen = 0;
 
@@ -150,7 +179,12 @@ function makeRepo(id: string, seed: Seed) {
     run,
     ev,
     ask: (a) => asks.push(a),
-    evidence: (e) => evidence.push({ id: evidence.length + 1, ...e }),
+    evidence: (e, isCarried) => {
+      const id = evidence.length + 1;
+      evidence.push({ id, ...e });
+      if (isCarried) carried.set(id, e.tree);
+    },
+    judgment: (j) => judgments.push({ id: judgments.length + 1, ...j }),
     live: (r, script, every) => {
       let step = 0;
       setInterval(() => {
@@ -164,10 +198,35 @@ function makeRepo(id: string, seed: Seed) {
 
   const required = (t: MockTask) => [...new Set([...t.checks, ...Object.entries(seed.guards ?? {}).filter(([path]) => t.scope.includes(path)).map(([, c]) => c)])].sort();
 
+  const latest = (name: string, runId?: string) => [...evidence].reverse().find((x) => x.check_name === name && (!runId || x.run === runId));
+
   const checkStatus = (name: string, runId?: string): CheckStatus => {
-    const e = [...evidence].reverse().find((x) => x.check_name === name && (!runId || x.run === runId));
+    const e = latest(name, runId);
     if (!e) return { status: "unverified" };
-    return { status: "current", outcome: e.outcome, evidence: e.id };
+    const from = carried.get(e.id);
+    return from ? { status: "carried", outcome: e.outcome, evidence: e.id, from_tree: from } : { status: "current", outcome: e.outcome, evidence: e.id };
+  };
+
+  // Same shape as kitsu::check::receipt: the evidence row behind a status.
+  const receipt = (name: string, runId?: string): Receipt | null => {
+    const e = latest(name, runId);
+    if (!e) return null;
+    const from = carried.get(e.id);
+    return { check: name, evidence: e.id, command: e.command, fingerprint: fingerprint(e.command), tree: e.tree, outcome: e.outcome, exit_code: e.exit_code, duration_ms: e.duration_ms, started_at: e.started_at, run: e.run, binding: from ? "carried" : "current" };
+  };
+  const receiptsFor = (t: MockTask, runId: string) => required(t).flatMap((c) => receipt(c, runId) ?? []);
+
+  // status::unchecked_paths: changed paths outside the scope of every check this change requires.
+  const scopeOf = (name: string) => seed.rules.checks.find((c) => c.name === name)?.scope ?? [];
+  const unguardedFor = (t: MockTask, changed: string[]) => changed.filter((p) => !required(t).some((c) => scopeOf(c).length === 0 || scopeOf(c).some((g) => globMatch(g, p))));
+
+  // status::enforcing_checks, for the globs the preview uses: every glob of the
+  // decision's scope is a guard glob, or sits under a `dir/**` guard.
+  const enforcedBy = (scope: string[]) => {
+    const guards = seed.rules.checks.filter((c) => c.guards.length);
+    if (!scope.length) return [];
+    const by = scope.map((g) => guards.filter((c) => c.guards.some((h) => h === g || (h.endsWith("/**") && g.startsWith(h.slice(0, -2))))).map((c) => c.name));
+    return by.some((b) => !b.length) ? [] : [...new Set(by.flat())].sort();
   };
 
   function view(t: MockTask): TaskView {
@@ -183,8 +242,14 @@ function makeRepo(id: string, seed: Seed) {
     }
     const fin = open.find((r) => r.state === "finished");
     if (fin) {
-      const failing = required(t).filter((c) => checkStatus(c, fin.id).status !== "current");
-      return { ...base, status: { kind: "review", run: fin.id, agent: fin.agent, verdict: failing.length ? "unverified" : "verified", failing: [] }, attention: "needs_you", reason: failing.length ? "ready for review, not verified yet" : "ready for review, checks pass" };
+      const failing = required(t).filter((c) => !["current", "carried"].includes(checkStatus(c, fin.id).status));
+      const unguarded = unguardedFor(t, fin.changed ?? []);
+      return {
+        ...base,
+        status: { kind: "review", run: fin.id, agent: fin.agent, verdict: failing.length ? "unverified" : "verified", failing: [], unguarded, receipts: receiptsFor(t, fin.id) },
+        attention: "needs_you",
+        reason: failing.length ? "ready for review, not verified yet" : "ready for review, checks pass",
+      };
     }
     const failed = open[0];
     if (failed) return { ...base, status: { kind: "failed", run: failed.id, agent: failed.agent, detail: failed.detail ?? "failed" }, attention: "needs_you", reason: `${failed.agent} failed: ${failed.detail}` };
@@ -264,7 +329,7 @@ function makeRepo(id: string, seed: Seed) {
           markdown: `# ${t.title}\n\n${t.body}\n\n## Done means\n${req.map((c) => `- Check \`${c}\` passes`).join("\n") || "- You accept it"}`,
           included: [
             { kind: "task", id: t.id, title: t.title, path: `.kitsu/tasks/${t.id}.md`, content_id: "a1", why: "the task" },
-            ...decisions.map((d) => ({ kind: "decision", id: d.id, title: d.title, path: d.path, content_id: "c3", why: `task scope ${t.scope.join(", ")} overlaps ${d.scope.join(", ")}` })),
+            ...decisions.map((d) => ({ kind: "decision", id: d.id, title: d.title, path: d.path, content_id: "c3", why: `task scope ${t.scope.join(", ")} overlaps ${d.scope.join(", ")}`, enforced_by: enforcedBy(d.scope) })),
           ],
           omitted: [],
           problems: [],
@@ -283,7 +348,9 @@ function makeRepo(id: string, seed: Seed) {
     review: (a): Review => {
       const r = runs.find((x) => x.id === a.run)!;
       const t = tasks.find((x) => x.id === r.task)!;
-      const files = (r.changed ?? t.scope.filter((s) => !s.includes("*"))).map((path, i) => ({ path, added: 18 + i * 23, removed: i ? 0 : 6 }));
+      const changed = r.changed ?? t.scope.filter((s) => !s.includes("*"));
+      const files = changed.map((path, i) => ({ path, added: 18 + i * 23, removed: i ? 0 : 6 }));
+      const said = [...events].reverse().find((e) => e.run === r.id && e.kind === "agent.message");
       return {
         run: r.id,
         target: info.branch,
@@ -293,6 +360,10 @@ function makeRepo(id: string, seed: Seed) {
         protected: [],
         approval_token: null,
         checks: required(t).map((c) => [c, checkStatus(c, r.id)] as [string, CheckStatus]),
+        receipts: receiptsFor(t, r.id),
+        unguarded: unguardedFor(t, changed),
+        claim: said ? String((said.body as { text?: string }).text ?? "") : null,
+        judgments: judgments.filter((j) => j.run === r.id),
       };
     },
     file_diff: (a) => ({ path: a.path, old: seed.diff.old, new: seed.diff.new, protected: false }),
@@ -356,7 +427,7 @@ function makeRepo(id: string, seed: Seed) {
       if (a.closeTask) t.state = "done";
       ev(r.id, "integration.state", { state: "applied" });
       changed();
-      return { result: "applied", commit: "5231cde353aa", closed_task: !!a.closeTask, notes: [] };
+      return { result: "applied", commit: "5231cde353aa", closed_task: !!a.closeTask, notes: [], unguarded: unguardedFor(t, r.changed ?? []) };
     },
     discard_run: (a) => {
       runs.find((x) => x.id === a.run)!.resolution = "discarded";
@@ -406,7 +477,18 @@ function makeRepo(id: string, seed: Seed) {
       changed();
       return v;
     },
-    rules: (): Rules => ({ ...seed.rules, questions: questions.map((q) => ({ ...q, path: `.kitsu/questions/${q.id}.md` })) }),
+    rules: (): Rules => ({
+      decisions: seed.rules.decisions.map((d) => ({ ...d, enforced_by: enforcedBy(d.scope) })),
+      memory: seed.rules.memory,
+      // The checkout's latest evidence for each check, like status_at on the working tree.
+      checks: seed.rules.checks.map((c) => {
+        const r = receipt(c.name);
+        const s = c.status;
+        if (!r || s.status === "unverified" || s.status === "missing") return { ...c, receipt: null };
+        return { ...c, receipt: { ...r, outcome: s.outcome, exit_code: s.outcome === "pass" ? 0 : 1, binding: s.status } };
+      }),
+      questions: questions.map((q) => ({ ...q, path: `.kitsu/questions/${q.id}.md` })),
+    }),
     run_checks: () => {
       if (!info.trusted) throw { kind: "denied", message: "trust this repository first; checks run its code" };
       return [];
@@ -430,7 +512,7 @@ const payments = makeRepo("a4493a668f92", {
   trusted: true,
   checks: ["idempotency", "refunds", "retries"],
   guards: { "payments.py": "idempotency" },
-  counts: { decisions: 2, memory: 3, checks: 3 },
+  counts: { decisions: 3, memory: 3, checks: 3 },
   tasks: [
     { id: "bounded-retries", title: "Stop retrying forever when the upstream times out", state: "open", scope: ["payments.py"], checks: ["retries"], after: ["persist-idempotency-keys"], body: "Last Tuesday the upstream browned out for 20 minutes and every web worker sat in `charge()` spinning on timeouts. That made our outage longer than theirs." },
     { id: "refund-endpoint", title: "Add refunds that can't be issued twice", state: "open", scope: ["refunds.py", "payments.py"], checks: ["refunds"], after: [], body: "Support asked for partial refunds. Same rules as charges: a lost response must not turn into two refunds." },
@@ -450,6 +532,8 @@ const payments = makeRepo("a4493a668f92", {
     decisions: [
       { id: "one-key-per-charge", title: "One idempotency key per logical charge, reused by every retry", state: "accepted", scope: ["payments.py"], rejected: [], body: "The upstream can charge the card and then lose the response. The only thing that makes a retry safe is sending the same `idempotency_key` again.", path: ".kitsu/decisions/one-key-per-charge.md" },
       { id: "retry-budget", title: "Retry charges at most 3 times, only with an idempotency key", state: "accepted", scope: ["payments.py"], rejected: ["Infinite retry: turns an upstream brownout into our outage", "Circuit breaker for now: one caller, no evidence of long outages", "Retrying without a key: a lost response becomes a second charge"], body: "Three attempts total, with jittered backoff between them.", path: ".kitsu/decisions/retry-budget.md" },
+      // No check guards the runbook: this one is a note, and the UI says so.
+      { id: "retries-are-logged", title: "Every retry is logged with its charge id, and the runbook says how to read it", state: "accepted", scope: ["payments.py", "docs/runbook.md"], rejected: [], body: "On-call greps the logs for the charge id first.", path: ".kitsu/decisions/retries-are-logged.md" },
     ],
     memory: [
       { id: "upstream-dedupes", title: "The upstream dedupes idempotency keys for 24 hours", kind: "fact", scope: ["payments.py"], anchors: ["payments.py"], by: "you", run: null, body: "From their API docs, section Idempotency. A retry after 24h is a new charge.", path: ".kitsu/memory/upstream-dedupes.md", freshness: { status: "current" }, personal: false, state: "current", superseded_by: null, reason: null, key: null },
@@ -457,12 +541,12 @@ const payments = makeRepo("a4493a668f92", {
       { id: "personal/small-commits", title: "Small commits, one idea each", kind: "preference", scope: [], anchors: [], by: null, run: null, body: "", path: "~/.config/kitsu/memory/small-commits.md", freshness: { status: "unanchored" }, personal: true, state: "current", superseded_by: null, reason: null, key: null },
     ],
     checks: [
-      { name: "retries", run: "python3 -m unittest -q test_retries", scope: [], guards: [], why: null, status: { status: "stale", outcome: "fail", evidence: 1, changed: ["payments.py"], more: 0 } },
+      { name: "retries", run: "python3 -m unittest -q test_retries", scope: ["payments.py", "test_retries.py", "fake_upstream.py"], guards: [], why: null, status: { status: "stale", outcome: "fail", evidence: 1, changed: ["payments.py"], more: 0 } },
       { name: "idempotency", run: "python3 -m unittest -q test_idempotency", scope: ["payments.py"], guards: ["payments.py"], why: "A retry after a lost response must not charge the card twice", status: { status: "stale", outcome: "fail", evidence: 2, changed: ["payments.py"], more: 0 } },
       { name: "refunds", run: "python3 -m unittest -q test_refunds", scope: [], guards: [], why: null, status: { status: "unverified" } },
     ],
   },
-  files: ["payments.py", "fake_upstream.py", "test_idempotency.py", "test_retries.py", "metrics.py", "refunds.py", ".kitsu/kitsu.toml", ".kitsu/tasks/bounded-retries.md", ".kitsu/decisions/one-key-per-charge.md", ".kitsu/decisions/retry-budget.md"],
+  files: ["payments.py", "docs/runbook.md", "fake_upstream.py", "test_idempotency.py", "test_retries.py", "metrics.py", "refunds.py", ".kitsu/kitsu.toml", ".kitsu/tasks/bounded-retries.md", ".kitsu/decisions/one-key-per-charge.md", ".kitsu/decisions/retry-budget.md"],
   diff: {
     old: '"""Charges a card through an upstream payment API."""\n\nimport uuid\n\n\nclass Timeout(Exception):\n    pass\n\n\ndef charge(upstream, card, amount):\n    # Upstream has been flaky, so keep trying until it goes through.\n    while True:\n        try:\n            return upstream.post("/charges", card=card, amount=amount)\n        except Timeout:\n            continue\n',
     new: '"""Charges a card through an upstream payment API."""\n\nimport random\nimport time\nimport uuid\n\n\nclass Timeout(Exception):\n    pass\n\n\nMAX_ATTEMPTS = 3\n\n\ndef charge(upstream, card, amount, sleep=time.sleep):\n    # One key for the whole logical charge. If the upstream charged us and\n    # the response got lost, the retry carries the same key and is a no-op.\n    key = str(uuid.uuid4())\n    for attempt in range(MAX_ATTEMPTS):\n        try:\n            return upstream.post("/charges", card=card, amount=amount, idempotency_key=key)\n        except Timeout:\n            if attempt == MAX_ATTEMPTS - 1:\n                raise\n            sleep(random.uniform(0, 0.05 * 2**attempt))\n',
@@ -475,18 +559,23 @@ const payments = makeRepo("a4493a668f92", {
   worktrees: [{ path: "/home/you/payments-spike", head: "4e0aa17d3c", branch: "spike/circuit-breaker", locked: false, prunable: false, owner: { kind: "yours" } }],
   history: (h) => {
     // A finished, verified attempt waiting for review.
-    const good = h.run({ id: "r7k2mq", task: "bounded-retries", state: "finished", stop_reason: "end_turn", snapshot: "c0ffee1", ended_at: minutes(3), created_at: minutes(9), changed: ["payments.py"], usage: { input: 18400, output: 2900, cached_read: 61000, total: 82300, context_used: 41000, context_size: 200000, cost: 0.19, currency: "USD" } });
+    const good = h.run({ id: "r7k2mq", task: "bounded-retries", state: "finished", stop_reason: "end_turn", snapshot: "c0ffee1", ended_at: minutes(3), created_at: minutes(9), changed: ["payments.py", "docs/runbook.md"], usage: { input: 18400, output: 2900, cached_read: 61000, total: 82300, context_used: 41000, context_size: 200000, cost: 0.19, currency: "USD" } });
     h.ev(good.id, "run.state", { to: "running" }, minutes(9));
     h.ev(good.id, "agent.plan", { entries: [{ content: "Bound the retry loop to 3 attempts", status: "completed" }, { content: "Create the idempotency key once, before the first attempt", status: "completed" }, { content: "Run the checks", status: "completed" }] }, minutes(8));
     h.ev(good.id, "agent.message", { text: "Reading the charge path and the retry loop first." }, minutes(8));
     h.ev(good.id, "agent.tool", { id: "t1", title: "Read payments.py", kind: "read", status: "completed", locations: ["payments.py"] }, minutes(8));
     h.ev(good.id, "agent.tool", { id: "t2", title: "Edit payments.py", kind: "edit", status: "completed", locations: ["payments.py"] }, minutes(6));
-    h.ev(good.id, "agent.message", { text: "Bounded to 3 attempts with jittered backoff; the key is created once per charge so a lost response can't double-charge." }, minutes(4));
+    h.ev(good.id, "agent.tool", { id: "t3", title: "Edit docs/runbook.md", kind: "edit", status: "completed", locations: ["docs/runbook.md"] }, minutes(5.5));
+    // Triage let a test run through on the judge's word: a judgment, stored as one.
+    h.judgment({ run: good.id, purpose: "permission", kind: "yes_no", outcome: "answered", answers: { low_risk: { type: "yes_no", p_yes: 0.96 } }, reason: null, model: "jev-latest", latency_ms: 412, created_at: minutes(5) });
+    h.ev(good.id, "permission", { title: "Run `python3 -m unittest -q test_retries`", kind: "execute", decision: "allow_once", by: "judge", judgment: 1, p_yes: 0.96, threshold: 0.9 }, minutes(5));
+    h.ev(good.id, "agent.message", { text: "Bounded to 3 attempts with jittered backoff; the key is created once per charge so a lost response can't double-charge. Updated the runbook too." }, minutes(4));
     h.ev(good.id, "run.state", { to: "finished", stop_reason: "end_turn" }, minutes(3));
-    for (const [name, cmd] of [["retries", "python3 -m unittest -q test_retries"], ["idempotency", "python3 -m unittest -q test_idempotency"]] as const) {
-      h.evidence({ check_name: name, command: cmd, tree: "t-good", tree_after: null, outcome: "pass", exit_code: 0, duration_ms: 140, run: good.id, started_at: minutes(3) });
-      h.ev(good.id, "check.done", { check: name, outcome: "pass" }, minutes(3));
-    }
+    h.evidence({ check_name: "retries", command: "python3 -m unittest -q test_retries", tree: "3f9a2c1d7be04e58a1c6", tree_after: null, outcome: "pass", exit_code: 0, duration_ms: 1840, run: good.id, started_at: minutes(3) });
+    h.ev(good.id, "check.done", { check: "retries", outcome: "pass" }, minutes(3));
+    // Ran on an earlier snapshot; nothing it looks at changed since.
+    h.evidence({ check_name: "idempotency", command: "python3 -m unittest -q test_idempotency", tree: "9e41b7c20d5a33f1c0de", tree_after: null, outcome: "pass", exit_code: 0, duration_ms: 610, run: good.id, started_at: minutes(5) }, true);
+    h.ev(good.id, "check.done", { check: "idempotency", outcome: "pass" }, minutes(5));
 
     // An agent currently working, streaming as you watch.
     const live = h.run({ id: "r9fh3p", task: "refund-endpoint", agent: "codex", created_at: minutes(2) });
@@ -569,7 +658,7 @@ const web = makeRepo("267072f47daf", {
     h.ev(review.id, "run.state", { to: "running" }, minutes(40));
     h.ev(review.id, "agent.message", { text: "Replaced 41 hex codes with 12 tokens; the dark theme is a second block of the same names." }, minutes(23));
     h.ev(review.id, "run.state", { to: "finished", stop_reason: "end_turn" }, minutes(22));
-    h.evidence({ check_name: "unit", command: "npm test", tree: "t-tokens", tree_after: null, outcome: "pass", exit_code: 0, duration_ms: 2300, run: review.id, started_at: minutes(22) });
+    h.evidence({ check_name: "unit", command: "npm test", tree: "b27d5e90a4c1f38e6d02", tree_after: null, outcome: "pass", exit_code: 0, duration_ms: 2300, run: review.id, started_at: minutes(22) });
 
     const flaky = h.run({ id: "rw8p1x", task: "flaky-cart-e2e", agent: "gemini", state: "failed", detail: "the agent process exited (code 1) before finishing", created_at: minutes(55), ended_at: minutes(50) });
     h.ev(flaky.id, "run.state", { to: "failed", detail: flaky.detail }, minutes(50));
