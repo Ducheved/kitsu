@@ -896,3 +896,237 @@ fn paths_outside_the_worktree_are_refused_symlinks_included() {
     assert!(!env.repo.join(".git/kitsu/worktrees/escape.txt").exists());
     assert!(!Path::new("/tmp/kitsu-escape.txt").exists());
 }
+
+type Heard = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+
+/// A stand-in for TypeSafe System One: one recorded response body (in the
+/// schema of typesafe-sdk's `_schemas/models.py`) per request, in order.
+/// Keeps each request's head and JSON body.
+fn fake_judge(bodies: Vec<String>) -> (String, Heard) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let heard: Heard = Default::default();
+    let log = heard.clone();
+    std::thread::spawn(move || {
+        for body in bodies {
+            let Ok((mut s, _)) = listener.accept() else {
+                return;
+            };
+            let mut r = BufReader::new(s.try_clone().expect("clone"));
+            let (mut head, mut len) = (String::new(), 0usize);
+            loop {
+                let mut l = String::new();
+                if r.read_line(&mut l).unwrap_or(0) == 0 || l.trim().is_empty() {
+                    break;
+                }
+                if let Some(v) = l.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+                head.push_str(&l);
+            }
+            let mut b = vec![0u8; len];
+            let _ = r.read_exact(&mut b);
+            log.lock()
+                .expect("lock")
+                .push((head, serde_json::from_slice(&b).unwrap_or(Value::Null)));
+            let _ = s.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    (url, heard)
+}
+
+fn low_risk(p: f64) -> String {
+    format!(
+        r#"{{"model":"jev-latest","answers":{{"low_risk":{{"type":"noul","noul":{p}}}}},"usage":{{"input_tokens":230,"output_tokens":1}}}}"#
+    )
+}
+
+#[test]
+fn triage_runs_what_the_judge_calls_low_risk_and_asks_you_the_rest_with_its_probability() {
+    let script = json!([
+        { "tool": "shell", "args": { "command": "echo judged > judged.txt" } },
+        { "tool": "shell", "args": { "command": "echo risky > risky.txt" } },
+        { "tool": "shell", "args": { "command": "curl -s https://example.com > page.html" } },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "probing" } },
+    ]);
+    let env = Env::new("triage", &script, "");
+    let (url, heard) = fake_judge(vec![low_risk(0.97), low_risk(0.35)]);
+    let toml = env.cfg.join("agents.toml");
+    let mut cfg = std::fs::read_to_string(&toml).expect("agents.toml");
+    cfg.push_str(&format!(
+        "\n[judge]\nbase_url = \"{url}\"\napi_key_env = \"KITSU_TEST_KEY\"\n"
+    ));
+    std::fs::write(&toml, cfg).expect("write");
+
+    let mut child = env
+        .cmd(&[
+            "run",
+            "bounded-retries",
+            "--agent",
+            "kitsu",
+            "--id",
+            "rn20",
+            "-q",
+            "--policy",
+            "triage",
+        ])
+        .spawn()
+        .expect("spawn");
+    let answer = |want: f64| -> Value {
+        let t0 = std::time::Instant::now();
+        loop {
+            if let Some(a) = env.store().open_asks().expect("asks").into_iter().next() {
+                assert_eq!(a.request["judge"]["p_yes"].as_f64(), Some(want));
+                env.ok(&["answer", &a.id.to_string(), "reject_once"]);
+                return a.request;
+            }
+            assert!(
+                t0.elapsed() < std::time::Duration::from_secs(30),
+                "no ask came"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    };
+    // The second command: the judge said 35%, below 90%: you see it.
+    let asked = answer(0.35);
+    let note = asked["judge"]["note"].as_str().expect("note");
+    assert!(note.contains("35%") && note.contains("90%"), "{note}");
+    // The third: curl is never the judge's to allow, and isn't sent.
+    let t0 = std::time::Instant::now();
+    let screened = loop {
+        if let Some(a) = env.store().open_asks().expect("asks").into_iter().next() {
+            break a;
+        }
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(30),
+            "no second ask"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert_eq!(screened.request["judge"]["screened"], "uses the network");
+    let status = env.ok(&["status"]);
+    assert!(
+        status.contains("Not judged: the command uses the network."),
+        "{status}"
+    );
+    env.ok(&["answer", &screened.id.to_string(), "reject_once"]);
+    assert!(child.wait().expect("wait").success());
+
+    let wt = env.repo.join(".git/kitsu/worktrees/rn20");
+    assert!(
+        wt.join("judged.txt").exists(),
+        "the judged command ran without an ask"
+    );
+    assert!(!wt.join("risky.txt").exists());
+    assert!(!wt.join("page.html").exists());
+
+    let ev = env.events("rn20");
+    let perms: Vec<&Value> = ev
+        .iter()
+        .filter(|(k, _)| k == "permission")
+        .map(|(_, b)| b)
+        .collect();
+    assert_eq!(perms.len(), 3, "{perms:#?}");
+    assert_eq!(perms[0]["by"], "judge");
+    assert_eq!(perms[0]["decision"], "allow_once");
+    assert_eq!(perms[0]["p_yes"], 0.97);
+    assert_eq!(
+        (perms[1]["by"].as_str(), perms[1]["p_yes"].as_f64()),
+        (Some("human"), Some(0.35))
+    );
+    assert_eq!(perms[2]["by"], "human");
+    // The auto-allow points at its stored judgment.
+    let store = env.store();
+    let j = store
+        .judgment(perms[0]["judgment"].as_i64().expect("judgment id"))
+        .expect("row");
+    assert_eq!(
+        (j.purpose.as_str(), j.run.as_deref(), j.outcome.as_str()),
+        ("permission", Some("rn20"), "answered")
+    );
+    assert_eq!(j.answers["low_risk"]["p_yes"], 0.97);
+    assert_eq!(store.judgments_for_run("rn20").expect("rows").len(), 2);
+    let config = ev
+        .iter()
+        .find(|(k, _)| k == "judge.config")
+        .expect("judge.config")
+        .1
+        .clone();
+    assert_eq!(config["on"], true);
+    assert_eq!(config["permission_threshold"], 0.9);
+    // Review can see why.
+    let shown = env.ok(&["show", "rn20"]);
+    assert!(shown.contains("(judge, judgment"), "{shown}");
+
+    // What the judge got: the key in its header only, the command as data.
+    let heard = heard.lock().expect("lock").clone();
+    assert_eq!(heard.len(), 2, "the screened command was never sent");
+    assert!(heard[0].0.starts_with("POST /v1/systemone "));
+    assert!(
+        heard[0]
+            .0
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {KEY}").to_ascii_lowercase())
+    );
+    assert_eq!(
+        heard[0].1["state"]["tool_call"]["arguments"]["command"],
+        "echo judged > judged.txt"
+    );
+    assert!(!heard[0].1["questions"].to_string().contains("judged"));
+    env.assert_key_never_written();
+}
+
+#[test]
+fn triage_without_a_judge_asks_you_and_says_why() {
+    let script = json!([
+        { "tool": "shell", "args": { "command": "echo hi > hi.txt" } },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "probing" } },
+    ]);
+    let env = Env::new("triage-off", &script, "");
+    let mut child = env
+        .cmd(&[
+            "run",
+            "bounded-retries",
+            "--agent",
+            "kitsu",
+            "--id",
+            "rn21",
+            "-q",
+            "--policy",
+            "triage",
+        ])
+        .spawn()
+        .expect("spawn");
+    let t0 = std::time::Instant::now();
+    let ask = loop {
+        if let Some(a) = env.store().open_asks().expect("asks").into_iter().next() {
+            break a;
+        }
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(30),
+            "no ask came"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert_eq!(ask.request["judge"]["unknown"], "unconfigured");
+    assert_eq!(ask.request["judge"]["p_yes"], Value::Null);
+    env.ok(&["answer", &ask.id.to_string(), "allow_once"]);
+    assert!(child.wait().expect("wait").success());
+    assert!(env.repo.join(".git/kitsu/worktrees/rn21/hi.txt").exists());
+    let ev = env.events("rn21");
+    assert!(
+        ev.iter()
+            .any(|(k, b)| k == "judge.config" && b["on"] == false)
+    );
+    assert!(
+        ev.iter()
+            .any(|(k, b)| k == "permission" && b["by"] == "human" && b["judgment"].is_i64())
+    );
+}

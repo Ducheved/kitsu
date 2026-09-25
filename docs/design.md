@@ -203,13 +203,16 @@ moved so you can gitignore build output.
 | Agent text → window | messages, titles | escaping Markdown subset; no HTML, no links |
 | Window → system | typed commands only | no fs/shell/http plugins; paths checked against the repo root (symlinks resolved); CSP |
 | Kitsu → git hooks | Kitsu's own commits | hooks disabled |
-| Kitsu → network | nothing | Kitsu makes no network calls; agents make their own |
+| Kitsu → network | its own loop's model requests; with `--policy triage`, shell commands to the judge | endpoints and key variable only from agents.toml; https or loopback; keys only in one header; otherwise agents make their own calls |
 
 What this does **not** protect against, stated plainly: an agent can run any
 command you could, read your home directory, and reach the network. The
 permission policy (`ask` asks before commands and anything outside the
-worktree; `auto` allows commands inside it) is approval UX that the agent
-chooses to consult. Containment is the `sandbox-linux` task.
+worktree; `auto` allows commands inside it; `triage`, for Kitsu's own
+loop, is `ask` except that a command the typed judge rates low-risk and
+confined above its threshold runs without asking, see decision
+`typed-judgments`) is approval UX that the agent chooses to consult.
+Containment is the `sandbox-linux` task.
 
 ## 7. Concurrency and ordering
 

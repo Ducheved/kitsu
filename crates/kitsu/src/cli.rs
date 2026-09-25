@@ -100,7 +100,9 @@ enum Cmd {
         #[arg(long)]
         note: Option<String>,
         /// ask: shell commands and network wait for you. auto: anything
-        /// inside the worktree is allowed.
+        /// inside the worktree is allowed. triage: ask, but Kitsu's own
+        /// loop lets a command through when the judge in agents.toml says
+        /// it's low-risk and stays in the worktree.
         #[arg(long, default_value = "ask")]
         policy: String,
         #[arg(long)]
@@ -295,8 +297,9 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
             id,
             quiet,
         } => {
-            let policy = Policy::parse(&policy)
-                .ok_or_else(|| Error::Invalid(format!("unknown policy `{policy}` (ask, auto)")))?;
+            let policy = Policy::parse(&policy).ok_or_else(|| {
+                Error::Invalid(format!("unknown policy `{policy}` (ask, auto, triage)"))
+            })?;
             return run(
                 &ws,
                 Options {
@@ -659,6 +662,9 @@ fn status(ws: &Workspace, json: bool) -> Result<()> {
             a.request["title"].as_str().unwrap_or("?"),
             paint(&format!("kitsu answer {} <{}>", a.id, opts.join("|")), DIM)
         );
+        if let Some(note) = a.request["judge"]["note"].as_str() {
+            println!("    {}", paint(note, DIM));
+        }
     }
     let mut group: Option<Attention> = None;
     for v in &views {
@@ -762,9 +768,22 @@ fn show(ws: &Workspace, id: &str, json: bool) -> Result<()> {
                     .unwrap_or_default()
             ),
             "permission" => format!(
-                "allowed: {} ({})",
+                "{}: {} ({}{})",
+                if e.body["decision"]
+                    .as_str()
+                    .is_some_and(|d| d.starts_with("allow"))
+                {
+                    "allowed"
+                } else {
+                    "decided"
+                },
                 e.body["title"].as_str().unwrap_or("?"),
-                e.body["by"].as_str().unwrap_or("?")
+                e.body["by"].as_str().unwrap_or("?"),
+                match (e.body["judgment"].as_i64(), e.body["p_yes"].as_f64()) {
+                    (Some(j), Some(p)) => format!(", judgment {j}: p={p:.2}"),
+                    (Some(j), None) => format!(", judgment {j}: unknown"),
+                    _ => String::new(),
+                }
             ),
             "ask.open" => format!(
                 "asked you: {}",

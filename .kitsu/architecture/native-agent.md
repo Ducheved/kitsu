@@ -4,7 +4,7 @@ level = "component"
 parent = "cli"
 technology = "Rust, OpenAI-compatible Chat Completions"
 paths = ["crates/kitsu/src/agent/**"]
-uses = ["runs", "evidence", "status", "rules", "agent-tools", "store", "workspace", "gitio", "shared", { to = "model", why = "chat completions over HTTPS" }]
+uses = ["runs", "evidence", "status", "rules", "agent-tools", "store", "workspace", "gitio", "shared", "judge", { to = "model", why = "chat completions over HTTPS" }]
 +++
 A brain (the loop that calls the model, `brain.rs`) and a host (tools,
 journal, policy, `finish` verification, `host.rs`) that talk only in

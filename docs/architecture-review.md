@@ -230,7 +230,7 @@ or *reject for now*. Nothing is marked "adopt" without evidence.
 | Learned skills with promotion gates (Voyager, ReasoningBank) | F10 procedures | none | — | checks and decisions are the procedures | — | reject for now |
 | Self-reflection stored (Reflexion) | — | — | — | — | — | reject: reflection is a hypothesis, not state |
 | Workflow engine (Temporal, Burr, LangGraph) | durability | covered by the OS lock + git receipts + the reducer | — | — | runs across machines | reject |
-| Typed judgments (Jev) | semantic decisions (scope misses, permission triage) | no labelled data yet | `judge-core` with stored judgments, fail to "unknown" | rules | per use: its own eval gate | investigate, blocked on a key |
+| Typed judgments (Jev) | semantic decisions (scope misses, permission triage) | no labelled data yet | `judge.rs`: stored judgments, fail to "unknown"; first use `--policy triage` (off by default) | rules | per use: its own eval gate | investigate: built against recorded responses; live eval blocked on a key |
 
 ---
 

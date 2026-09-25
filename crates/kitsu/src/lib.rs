@@ -16,6 +16,7 @@ pub mod git;
 pub mod index;
 pub mod integrate;
 pub mod intent;
+pub mod judge;
 pub mod mcp;
 pub mod memory;
 pub mod recover;

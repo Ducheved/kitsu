@@ -20,7 +20,30 @@ use crate::error::{Error, Result};
 use crate::run::{Outcome, RunEvent, RunState, reduce};
 use crate::util::now_ms;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
+
+/// v3. Typed judgments (`judge.rs`): what was asked about which inputs (by
+/// hash), what came back, or why nothing did. One row per request.
+const JUDGMENTS: &str = r#"
+CREATE TABLE IF NOT EXISTS judgments (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run           TEXT,
+    purpose       TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    inputs        TEXT NOT NULL,
+    outcome       TEXT NOT NULL,
+    answers       TEXT NOT NULL,
+    reason        TEXT,
+    model         TEXT,
+    latency_ms    INTEGER NOT NULL,
+    attempts      INTEGER NOT NULL,
+    input_tokens  INTEGER,
+    output_tokens INTEGER,
+    request_id    TEXT,
+    created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS judgments_by_run ON judgments(run, id);
+"#;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -316,6 +339,47 @@ pub struct AskRow {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct NewJudgment<'a> {
+    pub run: Option<&'a str>,
+    /// Which caller asked: `permission`, later `rerank`, `guard`, ...
+    pub purpose: &'a str,
+    /// Question kinds in order, comma-separated (`yes_no`, `choice`, `score`).
+    pub kind: &'a str,
+    /// SHA-256 of the request body (without the key).
+    pub inputs: &'a str,
+    /// `answered` when every question got a valid answer, else `unknown`.
+    pub outcome: &'a str,
+    /// By question name: the answer and its probabilities, or why none.
+    pub answers: &'a Value,
+    pub reason: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub latency_ms: i64,
+    pub attempts: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub request_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JudgmentRow {
+    pub id: i64,
+    pub run: Option<String>,
+    pub purpose: String,
+    pub kind: String,
+    pub inputs: String,
+    pub outcome: String,
+    pub answers: Value,
+    pub reason: Option<String>,
+    pub model: Option<String>,
+    pub latency_ms: i64,
+    pub attempts: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub request_id: Option<String>,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IntegrationState {
@@ -473,6 +537,9 @@ impl Store {
             }
             if version == 1 {
                 tx.execute_batch("ALTER TABLE runs ADD COLUMN usage TEXT;")?;
+            }
+            if version < 3 {
+                tx.execute_batch(JUDGMENTS)?;
             }
             if version < SCHEMA_VERSION {
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -865,6 +932,63 @@ impl Store {
         Ok(rows)
     }
 
+    // ---- judgments ---------------------------------------------------------
+
+    pub fn insert_judgment(&self, j: &NewJudgment<'_>) -> Result<i64> {
+        let tx = self.write_tx()?;
+        tx.execute(
+            "INSERT INTO judgments (run, purpose, kind, inputs, outcome, answers, reason, model, latency_ms,
+                                    attempts, input_tokens, output_tokens, request_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                j.run,
+                j.purpose,
+                j.kind,
+                j.inputs,
+                j.outcome,
+                j.answers.to_string(),
+                j.reason,
+                j.model,
+                j.latency_ms,
+                j.attempts,
+                j.input_tokens,
+                j.output_tokens,
+                j.request_id,
+                now_ms()
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        append_event(
+            &tx,
+            j.run,
+            "judge.done",
+            &serde_json::json!({ "judgment": id, "purpose": j.purpose, "outcome": j.outcome, "reason": j.reason }),
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn judgment(&self, id: i64) -> Result<JudgmentRow> {
+        self.conn
+            .query_row(
+                &format!("SELECT {JUDGMENT_COLS} FROM judgments WHERE id = ?1"),
+                [id],
+                judgment_row,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("judgment {id}")))
+    }
+
+    pub fn judgments_for_run(&self, run: &str) -> Result<Vec<JudgmentRow>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {JUDGMENT_COLS} FROM judgments WHERE run = ?1 ORDER BY id"
+        ))?;
+        let rows = stmt
+            .query_map([run], judgment_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     // ---- asks: a live agent waiting on a human ------------------------------
 
     pub fn insert_ask(&self, run: &str, request: &Value) -> Result<i64> {
@@ -1112,6 +1236,29 @@ fn evidence_row(r: &Row<'_>) -> rusqlite::Result<EvidenceRow> {
     })
 }
 
+const JUDGMENT_COLS: &str = "id, run, purpose, kind, inputs, outcome, answers, reason, model, latency_ms, attempts, input_tokens, output_tokens, request_id, created_at";
+
+fn judgment_row(r: &Row<'_>) -> rusqlite::Result<JudgmentRow> {
+    let answers: String = r.get(6)?;
+    Ok(JudgmentRow {
+        id: r.get(0)?,
+        run: r.get(1)?,
+        purpose: r.get(2)?,
+        kind: r.get(3)?,
+        inputs: r.get(4)?,
+        outcome: r.get(5)?,
+        answers: serde_json::from_str(&answers).unwrap_or(Value::String(answers)),
+        reason: r.get(7)?,
+        model: r.get(8)?,
+        latency_ms: r.get(9)?,
+        attempts: r.get(10)?,
+        input_tokens: r.get(11)?,
+        output_tokens: r.get(12)?,
+        request_id: r.get(13)?,
+        created_at: r.get(14)?,
+    })
+}
+
 fn ask_row(r: &Row<'_>) -> rusqlite::Result<AskRow> {
     let req: String = r.get(2)?;
     Ok(AskRow {
@@ -1198,6 +1345,74 @@ mod tests {
         };
         s.set_run_usage("old", &u).expect("usage");
         assert_eq!(s.run("old").expect("run").usage, Some(u));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v2_databases_gain_judgments_and_keep_their_runs() {
+        let dir = std::env::temp_dir().join(format!("kitsu-migrate-v2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("state.db");
+        {
+            // Schema v2 is SCHEMA as it stands, without JUDGMENTS.
+            let c = Connection::open(&path).expect("open");
+            c.execute_batch(SCHEMA).expect("v2 schema");
+            c.pragma_update(None, "user_version", 2).expect("version");
+            c.execute(
+                "INSERT INTO runs (id, task, agent, base, branch, worktree, state, created_at) VALUES ('old', 't', 'test', 'b', 'kitsu/run/old', '/tmp/wt', 'finished', 1)",
+                [],
+            )
+            .expect("insert");
+            let has: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = 'judgments'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("q");
+            assert_eq!(has, 0, "v2 has no judgments table");
+        }
+        let s = Store::open(&path).expect("upgrade");
+        let version: i64 = s
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .expect("v");
+        assert_eq!(version, 3);
+        assert_eq!(
+            s.run("old").expect("old run survives").state,
+            RunState::Finished
+        );
+        let answers = serde_json::json!({ "low_risk": { "type": "yes_no", "p_yes": 0.97 } });
+        let id = s
+            .insert_judgment(&NewJudgment {
+                run: Some("old"),
+                purpose: "permission",
+                kind: "yes_no",
+                inputs: "abc",
+                outcome: "answered",
+                answers: &answers,
+                reason: None,
+                model: Some("jev-latest"),
+                latency_ms: 12,
+                attempts: 1,
+                input_tokens: Some(200),
+                output_tokens: Some(1),
+                request_id: None,
+            })
+            .expect("insert");
+        let row = s.judgment(id).expect("row");
+        assert_eq!(row.answers, answers);
+        assert_eq!(s.judgments_for_run("old").expect("list").len(), 1);
+        let ev = s.run_events("old", 0, 10).expect("events");
+        assert!(
+            ev.iter()
+                .any(|e| e.kind == "judge.done" && e.body["judgment"] == id)
+        );
+        drop(s);
+        // Opening again changes nothing.
+        let s = Store::open(&path).expect("reopen");
+        assert_eq!(s.judgment(id).expect("still there").id, id);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

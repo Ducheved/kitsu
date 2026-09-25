@@ -167,6 +167,22 @@ The loop is a brain (model calls) and a host (tools, journal, checks) that
 talk only in JSON-RPC, so the brain can later run elsewhere while your
 machine keeps the hands.
 
+`--policy triage` (experimental) is `ask`, except that a shell command
+TypeSafe's System One rates low-risk and confined to the worktree, at or
+above a threshold, runs without asking you. It's off until configured:
+
+```toml
+[judge]                  # the key is read from $TYPESAFE_API_KEY
+[judge.permissions]
+threshold = 0.9
+```
+
+No judge, an error, a timeout or a lower probability: you're asked, and
+the ask shows the probability or why there is none. Commands naming paths
+outside the worktree, `.git`, the network, package installs or `sudo` are
+never sent to the judge. Every judgment is stored and the run's log says
+which one let a command through.
+
 ## The desktop app
 
 ```sh

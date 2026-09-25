@@ -71,6 +71,22 @@ pub async fn drive(
             return Ok(store.run(id)?.state);
         }
     };
+    let judge = if opts.policy == crate::runner::Policy::Triage {
+        // A broken [judge] is a broken config, not a judge that says no.
+        match crate::agents::judge() {
+            Ok(c) => {
+                let j = crate::judge::Judge::new(c);
+                store.append(Some(id), "judge.config", &j.describe())?;
+                j
+            }
+            Err(e) => {
+                store.apply_run_event(id, &RunEvent::StartFailed(format!("judge: {e}")))?;
+                return Ok(store.run(id)?.state);
+            }
+        }
+    } else {
+        crate::judge::Judge::off()
+    };
     let cancelled_early = matches!(
         store.apply_run_event(id, &RunEvent::Started)?,
         Applied::Unchanged
@@ -87,6 +103,7 @@ pub async fn drive(
         HARNESS.to_string(),
         prep.brief.clone(),
     )?;
+    host.judge = judge;
     let (tx, mut rx) = mpsc::channel::<protocol::Wire>(1);
     let link = protocol::HostLink::new(tx);
     let (cancel_tx, cancel_rx) = watch::channel(cancelled_early);

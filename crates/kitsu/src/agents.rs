@@ -256,6 +256,43 @@ struct File {
     agents: BTreeMap<String, Entry>,
     #[serde(default)]
     limits: LimitsFront,
+    /// Typed judgments (`judge.rs`); off without it.
+    judge: Option<crate::judge::Config>,
+}
+
+/// `[judge]` from agents.toml, checked; `None` when there isn't one.
+///
+/// ```toml
+/// # TypeSafe System One. The key stays in the environment.
+/// [judge]
+/// api_key_env = "TYPESAFE_API_KEY"   # the default
+///
+/// # Used by `kitsu run --policy triage`.
+/// [judge.permissions]
+/// threshold = 0.9
+/// ```
+pub fn judge() -> Result<Option<crate::judge::Config>> {
+    let path = config_dir().join("agents.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_judge(&path, &text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::io(path.display().to_string(), e)),
+    }
+}
+
+pub(crate) fn parse_judge(
+    path: &std::path::Path,
+    text: &str,
+) -> Result<Option<crate::judge::Config>> {
+    let bad = |detail: String| Error::Parse {
+        path: path.to_path_buf(),
+        detail,
+    };
+    let file: File = toml::from_str(text).map_err(|e| bad(e.message().to_string()))?;
+    if let Some(j) = &file.judge {
+        j.validate().map_err(|d| bad(format!("judge: {d}")))?;
+    }
+    Ok(file.judge)
 }
 
 #[derive(Deserialize, Default)]
