@@ -16,6 +16,7 @@
   import Settings from "./components/Settings.svelte";
   import StatusBar from "./components/StatusBar.svelte";
   import TaskPage from "./components/TaskPage.svelte";
+  import PlanPage from "./components/PlanPage.svelte";
   import Fox from "./components/Fox.svelte";
   import Tour from "./components/Tour.svelte";
   import { tour } from "./lib/tour.svelte";
@@ -26,6 +27,7 @@
   let taskPage: TaskPage | undefined = $state();
   let rulesPage: RulesPage | undefined = $state();
   let explorer: Explorer | undefined = $state();
+  let planPage: PlanPage | undefined = $state();
   // The editor and diff views pull in CodeMirror (most of the bundle).
   // Load them on first use so startup only pays for the task UI.
   const codeWorkspace = () => import("./components/CodeWorkspace.svelte");
@@ -56,6 +58,7 @@
     const c: Command[] = [
       cmd("new", t("cmd.new"), later(() => (app.overlay = "new")), "n"),
       cmd("rules", t("cmd.rules"), () => app.go({ kind: "rules" }), "g r"),
+      cmd("plan", t("cmd.plan"), () => app.go({ kind: "plan" }), "g p"),
       cmd("home", t("cmd.home"), () => app.go({ kind: "home" }), "g h"),
       cmd("open", t("cmd.open"), later(() => (app.overlay = "files")), "⌘P"),
       cmd("mode", code ? t("cmd.work") : t("cmd.code"), () => app.setMode(code ? "work" : "code"), code ? "⌘1" : "⌘2"),
@@ -148,6 +151,11 @@
     }
     if (app.overlay) return;
     if (inEditable(e.target)) return;
+    // The Plan canvas has its own keys (arrows, n, e, f, ⌫, ⌘Z…).
+    if (!pendingG && app.view.kind === "plan" && planPage?.onKey(e)) {
+      e.preventDefault();
+      return;
+    }
     if (mod || e.altKey) return;
 
     if (pendingG) {
@@ -155,6 +163,7 @@
       clearTimeout(gTimer);
       if (e.key === "r") app.go({ kind: "rules" });
       else if (e.key === "h") app.go({ kind: "home" });
+      else if (e.key === "p") app.go({ kind: "plan" });
       e.preventDefault();
       return;
     }
@@ -236,6 +245,8 @@
     {/key}
   {:else if app.view.kind === "rules"}
     <RulesPage bind:this={rulesPage} />
+  {:else if app.view.kind === "plan"}
+    <PlanPage bind:this={planPage} />
   {:else if app.view.kind === "diff"}
     {#await diffPage() then m}<m.default run={app.view.run} path={app.view.path} />{/await}
   {:else}
@@ -249,9 +260,9 @@
   {:else}
     <Rail bind:filter bind:filtering />
   {/if}
-  <main class="scroll" class:flush={showEditor || app.view.kind === "diff"}>
+  <main class="scroll" class:flush={showEditor || app.view.kind === "diff" || app.view.kind === "plan"}>
     {#key viewKey}
-      <div class="view" class:fill={showEditor || app.view.kind === "diff"}>{@render page()}</div>
+      <div class="view" class:fill={showEditor || app.view.kind === "diff" || app.view.kind === "plan"}>{@render page()}</div>
     {/key}
   </main>
   {#if code && app.prefs.strip}<AgentStrip />{/if}

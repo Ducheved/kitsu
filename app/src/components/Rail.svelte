@@ -127,6 +127,10 @@
   </nav>
 
   <footer>
+    <button class="foot-link press" class:on={app.view.kind === "plan"} onclick={() => app.go({ kind: "plan" })}>
+      {t("rail.plan")}
+      <span class="hint">{t("rail.planHint")} · <kbd>g</kbd> <kbd>p</kbd></span>
+    </button>
     <button class="foot-link press" class:on={app.view.kind === "rules"} data-tour="rail-rules" onclick={() => app.go({ kind: "rules" })}>
       {t("rail.rules")}
       {#if ov}<span class="hint">{t("rail.checks", { n: ov.counts.checks })} · {t("rail.decisions", { n: ov.counts.decisions })}{ov.counts.memory ? ` · ${t("rail.memory", { n: ov.counts.memory })}` : ""}{ov.counts.open_questions ? ` · ${t("rail.openQuestions", { n: ov.counts.open_questions })}` : ""}</span>{/if}

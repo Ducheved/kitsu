@@ -8,6 +8,7 @@ import type {
   FileDiff,
   FileText,
   Overview,
+  Plan,
   Repo,
   Review,
   Rules,
@@ -66,6 +67,10 @@ export const api = {
       blocks: opts.blocks ?? [],
       body: opts.body ?? null,
     }),
+  plan: () => call<Plan>("plan"),
+  /** Rewrites only the given lists in the task's front matter; returns the file's new version. */
+  updateTask: (id: string, lists: { after?: string[]; checks?: string[]; scope?: string[] }, version?: string) =>
+    call<string>("update_task", { id, after: lists.after ?? null, checks: lists.checks ?? null, scope: lists.scope ?? null, version: version ?? null }),
   rules: () => call<Rules>("rules"),
   runChecks: (names: string[] = []) => call<Evidence[]>("run_checks", { names }),
   readFile: (path: string) => call<FileText>("read_file", { path }),

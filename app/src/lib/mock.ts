@@ -9,6 +9,7 @@ import type {
   CheckStatus,
   Evidence,
   Overview,
+  Plan,
   Rules,
   Run,
   RunDetail,
@@ -47,7 +48,7 @@ const tasks: MockTask[] = [
     state: "open",
     scope: ["payments.py"],
     checks: ["retries"],
-    after: [],
+    after: ["persist-idempotency-keys"],
     body: "Last Tuesday the upstream browned out for 20 minutes and every web worker sat in `charge()` spinning on timeouts. That made our outage longer than theirs.",
   },
   {
@@ -95,7 +96,66 @@ const tasks: MockTask[] = [
     after: [],
     body: "",
   },
+  {
+    id: "persist-idempotency-keys",
+    title: "Keep idempotency keys across worker restarts",
+    state: "done",
+    scope: ["payments.py", "store.py"],
+    checks: ["idempotency"],
+    after: [],
+    body: "Keys lived in memory, so a deploy mid-retry lost them.",
+  },
+  {
+    id: "partial-refunds",
+    title: "Allow partial refunds up to the charged amount",
+    state: "open",
+    scope: ["refunds.py"],
+    checks: ["refunds"],
+    after: ["refund-endpoint"],
+    body: "Several partial refunds may never add up to more than the charge.",
+  },
+  {
+    id: "refund-emails",
+    title: "Email the customer when a refund goes through",
+    state: "open",
+    scope: ["notify/**"],
+    checks: [],
+    after: ["partial-refunds", "webhook-signatures"],
+    body: "Only on the upstream's signed 'refund.succeeded', never on our own request.",
+  },
+  {
+    id: "retry-alerts",
+    title: "Page on-call when retries spike",
+    state: "open",
+    scope: ["ops/alerts.yml"],
+    checks: [],
+    after: ["metrics-export", "bounded-retries"],
+    body: "Alert on the retry rate, not on single timeouts.",
+  },
+  {
+    id: "minor-units",
+    title: "Store amounts in minor units, not floats",
+    state: "open",
+    scope: ["payments.py", "refunds.py"],
+    checks: ["retries", "refunds"],
+    after: [],
+    body: "0.1 + 0.2 already cost us a cent in reconciliation.",
+  },
+  {
+    id: "ledger-reconcile",
+    title: "Reconcile the ledger against upstream payouts nightly",
+    state: "open",
+    scope: ["ledger/**"],
+    checks: [],
+    after: ["minor-units", "partial-refunds"],
+    body: "Report any charge or refund that doesn't match a payout line.",
+  },
 ];
+
+// File versions for the Plan view's edits; bumped on every write.
+const versions = new Map(tasks.map((t) => [t.id, "v1"]));
+const checkNames = ["idempotency", "refunds", "retries"];
+const refused = (detail: string) => ({ kind: "invalid", message: `not saved, it would break the task files: ${detail}` });
 
 const questions = [
   {
@@ -366,9 +426,46 @@ const handlers: Record<string, (a: Record<string, unknown>) => unknown> = {
   },
   new_entity: (a) => {
     const id = String(a.title).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
-    if (a.kind === "task") tasks.push({ id, title: a.title as string, state: "open", scope: (a.scope as string[]) ?? [], checks: (a.checks as string[]) ?? [], after: (a.after as string[]) ?? [], body: (a.body as string) ?? "" });
+    if (a.kind === "task") versions.set(id, "v1");
+    if (a.kind === "task") tasks.push({ id, title: a.title as string, state: "open", scope: [...((a.scope as string[]) ?? [])], checks: [...((a.checks as string[]) ?? [])], after: [...((a.after as string[]) ?? [])], body: (a.body as string) ?? "" });
     changed();
     return { id, path: `.kitsu/tasks/${id}.md` };
+  },
+  plan: (): Plan => ({
+    tasks: tasks.map((t) => ({ id: t.id, title: t.title, state: t.state, scope: t.scope, checks: t.checks, after: t.after, path: `.kitsu/tasks/${t.id}.md`, version: versions.get(t.id) ?? "v1" })),
+    checks: checkNames,
+  }),
+  // Same refusals as kitsu::cli::update_task: unknown names, a stale file,
+  // anything that would close a loop.
+  update_task: (a) => {
+    const t = tasks.find((x) => x.id === a.id);
+    if (!t) throw { kind: "not_found", message: `not found: task ${a.id}` };
+    if (a.version && a.version !== versions.get(t.id)) throw { kind: "conflict", message: `conflict: .kitsu/tasks/${t.id}.md changed on disk since it was read` };
+    const clean = (v: unknown) => (v == null ? null : [...new Set((v as string[]).map((x) => x.trim()).filter(Boolean))]);
+    const after = clean(a.after);
+    const checks = clean(a.checks);
+    const scope = clean(a.scope);
+    const path = `.kitsu/tasks/${t.id}.md`;
+    for (const d of after ?? []) if (!tasks.some((x) => x.id === d)) throw refused(`${path}: \`after\` names unknown task \`${d}\``);
+    for (const c of checks ?? []) if (!checkNames.includes(c)) throw refused(`${path}: unknown check \`${c}\``);
+    if (after) {
+      // Would any new prerequisite, followed through its own, lead back here?
+      const seen = new Set<string>();
+      const reaches = (id: string): boolean => {
+        if (id === t.id) return true;
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return (tasks.find((x) => x.id === id)?.after ?? []).some(reaches);
+      };
+      if (after.some(reaches)) throw refused(`${path}: dependency cycle through ${t.id}`);
+      t.after = after;
+    }
+    if (checks) t.checks = checks;
+    if (scope) t.scope = scope;
+    const v = `v${Number((versions.get(t.id) ?? "v1").slice(1)) + 1}`;
+    versions.set(t.id, v);
+    changed();
+    return v;
   },
   rules: (): Rules => ({
     decisions: [

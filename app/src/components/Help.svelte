@@ -13,6 +13,7 @@
         ["n", "help.newTask"],
         ["g r", "help.rules"],
         ["g h", "help.home"],
+        ["g p", "help.plan"],
         ["⌘1  ⌘2", "help.layouts"],
         ["⌘,", "help.settings"],
         ["?", "help.this"],
@@ -42,6 +43,19 @@
       ],
     ],
     ["help.editor", [[":w  :q  :e path", "help.ex"], ["⌘S", "help.save"]]],
+    [
+      "help.planGroup",
+      [
+        ["← → ↑ ↓", "help.planMove"],
+        ["⏎", "help.open"],
+        ["n", "help.newTask"],
+        ["e", "help.planEdit"],
+        ["⇥  ⌫", "help.planLinks"],
+        ["⌘Z", "help.planUndo"],
+        ["f  +  −", "help.planFit"],
+        ["d", "help.planDim"],
+      ],
+    ],
   ];
 </script>
 
