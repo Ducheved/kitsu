@@ -1,6 +1,6 @@
 +++
 title = "One contract, enforced in every agent's hooks and in CI, judged by diff"
-state = "proposed"
+state = "accepted"
 scope = ["crates/kitsu/src/contract.rs", "crates/kitsu/src/hooks.rs", "crates/kitsu/src/intent.rs", "crates/kitsu/src/check.rs", ".github/actions/kitsu/**"]
 rejected = [
   "An ACP proxy between the editor and the agent: Claude Code and Codex speak ACP only through adapters, ACP permissions are advisory, and it only helps editors that route through the proxy. The vendors' own hooks already block, with semantics a proxy can't enforce",
