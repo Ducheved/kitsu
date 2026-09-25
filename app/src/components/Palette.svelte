@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { app } from "../lib/app.svelte";
-  import { api } from "../lib/api";
   import { t } from "../lib/i18n/index.svelte";
   import { statusText } from "../lib/status";
   import type { Command } from "../lib/types";
   import Fox from "./Fox.svelte";
+  // This project's commands, fixed for as long as the component lives.
+  const api = app.api;
 
   let { commands, files = false }: { commands: Command[]; files?: boolean } = $props();
 

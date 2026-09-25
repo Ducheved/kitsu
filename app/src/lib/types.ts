@@ -29,6 +29,7 @@ export interface TaskView {
 }
 
 export interface Repo {
+  id: string;
   root: string;
   name: string;
   branch: string | null;
@@ -280,6 +281,65 @@ export interface Command {
   id: string;
   title: string;
   hint?: string;
-  group: "commands" | "tasks" | "files";
+  group: "commands" | "projects" | "tasks" | "files";
   run: () => void;
+}
+
+/** One entry of the workspaces list (`workspaces.toml`). */
+export interface Project {
+  id: string;
+  name: string;
+  root: string;
+}
+
+/** What the switcher shows per project: `workspace_overview`. */
+export interface ProjectSummary extends Project {
+  branch: string | null;
+  trusted: boolean;
+  initialized: boolean;
+  needs_you: number;
+  working: number;
+  ready: number;
+  /** The folder isn't there any more. */
+  missing: boolean;
+  /** Why the counts are missing (folder gone, .kitsu/ unreadable…). */
+  error: string | null;
+}
+
+export interface BranchRow {
+  name: string;
+  head: string;
+  current: boolean;
+  upstream: string | null;
+  ahead: number | null;
+  behind: number | null;
+  gone: boolean;
+  /** Tip's committer date, Unix seconds. */
+  date: number;
+  subject: string;
+  /** Set for `kitsu/run/<id>` branches. */
+  run: string | null;
+  task: string | null;
+}
+
+export type WorktreeOwner =
+  | { kind: "main" }
+  | { kind: "run"; run: string; task: string | null; state: string | null }
+  | { kind: "integration" }
+  | { kind: "yours" };
+
+export interface WorktreeRow {
+  path: string;
+  head: string | null;
+  branch: string | null;
+  locked: boolean;
+  prunable: boolean;
+  owner: WorktreeOwner;
+}
+
+/** Branches and worktrees of one project: `git_view`. */
+export interface RepoTree {
+  branch: string | null;
+  branches: BranchRow[];
+  worktrees: WorktreeRow[];
 }

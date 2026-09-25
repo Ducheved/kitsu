@@ -20,6 +20,14 @@
         ["Esc", "help.back"],
       ],
     ],
+    [
+      "help.projects",
+      [
+        ["⌘O", "help.switcher"],
+        ["⌥1 … ⌥9", "help.projectN"],
+        ["g b", "help.tree"],
+      ],
+    ],
     ["help.list", [["j  k", "help.move"], ["⏎  o", "help.open"], ["/", "help.filter"]]],
     [
       "help.task",

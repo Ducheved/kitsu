@@ -28,5 +28,6 @@ pub mod status;
 pub mod store;
 pub mod util;
 pub mod workspace;
+pub mod workspaces;
 
 pub use error::{Error, Result};

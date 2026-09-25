@@ -3,72 +3,46 @@
 
 mod commands;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use commands::AppState;
+use kitsu::workspaces::List;
 use tauri::{Emitter, Manager};
 
 /// Look for changes that should refresh the window. Deliberately dumb and
-/// bounded: every 250 ms, compare the state database's `data_version` and
-/// the mtimes of files under `.kitsu/` and git's HEAD with the last look.
-/// If anything moved, emit one tiny event; the window pulls what it needs.
-/// There is no queue that can grow, only a dirty flag.
+/// bounded: every 250 ms, for each repository the window has opened,
+/// compare the state database's `data_version` and a `stat` fingerprint of
+/// `.kitsu/`, HEAD and the index with the last look. If anything moved,
+/// emit one tiny event naming that repository; the window pulls what it
+/// needs. There is no queue that can grow, only a dirty flag per repository.
 fn watch(app: tauri::AppHandle) {
     std::thread::spawn(move || {
-        let mut last: Option<(i64, u128)> = None;
-        let mut store: Option<(PathBuf, kitsu::store::Store)> = None;
+        type Seen = (Option<kitsu::store::Store>, Option<(i64, u64)>);
+        let mut seen: BTreeMap<String, Seen> = BTreeMap::new();
         loop {
             std::thread::sleep(Duration::from_millis(250));
-            let state = app.state::<AppState>();
-            let Some(ws) = state.ws.lock().ok().and_then(|g| g.clone()) else {
-                continue;
-            };
-            if store.as_ref().map(|(p, _)| p != &ws.root).unwrap_or(true) {
-                store = ws.open_store().ok().map(|s| (ws.root.clone(), s));
-                last = None;
-            }
-            let db = store
-                .as_ref()
-                .and_then(|(_, s)| s.data_version().ok())
-                .unwrap_or(0);
-            let fs = fingerprint(&ws);
-            if last != Some((db, fs)) {
-                if last.is_some() {
-                    let _ = app.emit("kitsu://changed", ());
+            let open = app.state::<AppState>().opened();
+            seen.retain(|id, _| open.iter().any(|(o, _)| o == id));
+            for (id, ws) in open {
+                let (store, last) = seen
+                    .entry(id.clone())
+                    .or_insert_with(|| (ws.open_store().ok(), None));
+                let db = store
+                    .as_ref()
+                    .and_then(|s| s.data_version().ok())
+                    .unwrap_or(0);
+                let now = (db, kitsu::workspaces::fingerprint(&ws));
+                if *last != Some(now) {
+                    if last.is_some() {
+                        let _ = app.emit("kitsu://changed", serde_json::json!({ "repo": id }));
+                    }
+                    *last = Some(now);
                 }
-                last = Some((db, fs));
             }
         }
     });
-}
-
-fn fingerprint(ws: &kitsu::workspace::Workspace) -> u128 {
-    fn mtime(p: &std::path::Path) -> u128 {
-        std::fs::metadata(p)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    }
-    let mut acc = 0u128;
-    let base = ws.root.join(kitsu::intent::DIR);
-    acc = acc.wrapping_add(mtime(&base.join("kitsu.toml")));
-    for kind in kitsu::intent::Kind::ALL {
-        let dir = base.join(kind.dir());
-        acc = acc.wrapping_mul(31).wrapping_add(mtime(&dir));
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                acc = acc.wrapping_add(mtime(&e.path()));
-            }
-        }
-    }
-    let git = ws.root.join(".git");
-    acc.wrapping_mul(31)
-        .wrapping_add(mtime(&git.join("HEAD")))
-        .wrapping_add(mtime(&git.join("index")))
 }
 
 fn main() {
@@ -84,16 +58,29 @@ fn main() {
         });
     }
 
+    // `kitsu-app ~/code/project` opens that project; otherwise the one
+    // around the current directory, if any. Either way it joins the list.
+    let launch_dir = args
+        .get(1)
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .or_else(|| std::env::current_dir().ok());
+
     tauri::Builder::default()
-        .manage(AppState {
-            ws: Mutex::new(None),
-            instance: Mutex::new(None),
-        })
+        .manage(AppState::new(List::new(List::default_path()), launch_dir))
         .setup(|app| {
             watch(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::launch_repo,
+            commands::list_workspaces,
+            commands::add_workspace,
+            commands::remove_workspace,
+            commands::rename_workspace,
+            commands::move_workspace,
+            commands::workspace_overview,
+            commands::git_view,
             commands::open_repo,
             commands::init_repo,
             commands::trust_repo,

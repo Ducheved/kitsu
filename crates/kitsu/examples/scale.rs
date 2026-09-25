@@ -584,6 +584,39 @@ fn stress(n: usize) {
     }
 }
 
+/// What the window's project switcher costs per poll, over the projects in
+/// `workspaces.toml` (set `KITSU_CONFIG_DIR` to point at a test list):
+/// every summary recomputed, then the cached path with nothing changed.
+fn overview(rounds: usize) {
+    use kitsu::workspaces::{self, Cache, List};
+    let entries = List::new(List::default_path())
+        .load()
+        .expect("workspaces.toml");
+    let time = |f: &dyn Fn()| {
+        let mut ms: Vec<f64> = (0..rounds.max(1))
+            .map(|_| {
+                let t = Instant::now();
+                f();
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        ms.sort_by(f64::total_cmp);
+        (ms[ms.len() / 2], ms[ms.len() * 95 / 100])
+    };
+    let (cold, cold95) = time(&|| {
+        workspaces::overview(&entries);
+    });
+    let cache = Cache::default();
+    cache.overview(&entries);
+    let (warm, warm95) = time(&|| {
+        cache.overview(&entries);
+    });
+    println!(
+        "{}",
+        json!({ "probe": "overview", "repos": entries.len(), "uncached_ms_p50": cold, "uncached_ms_p95": cold95, "cached_ms_p50": warm, "cached_ms_p95": warm95 })
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let num = |i: usize, d: usize| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
@@ -592,6 +625,9 @@ fn main() {
         Some("ingest") => ingest(num(1, 1001), num(2, 10)),
         Some("procs") => procs(num(1, 100)),
         Some("stress") => stress(num(1, 100)),
-        _ => eprintln!("usage: scale state [N] | ingest [STREAMS] [RATE] | procs [N] | stress [N]"),
+        Some("overview") => overview(num(1, 50)),
+        _ => eprintln!(
+            "usage: scale state [N] | ingest [STREAMS] [RATE] | procs [N] | stress [N] | overview [ROUNDS]"
+        ),
     }
 }

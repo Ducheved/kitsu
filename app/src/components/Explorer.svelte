@@ -1,8 +1,10 @@
 <script lang="ts">
   import { app } from "../lib/app.svelte";
-  import { api } from "../lib/api";
   import { buffers } from "../lib/buffers.svelte";
   import { t } from "../lib/i18n/index.svelte";
+  import RepoSwitcher from "./RepoSwitcher.svelte";
+  // This project's commands, fixed for as long as the component lives.
+  const api = app.api;
 
   interface Node {
     name: string;
@@ -130,7 +132,7 @@
 <aside class="explorer">
   <header>
     <span class="title">{t("explorer.title")}</span>
-    <span class="hint mono">{app.overview?.repo.name ?? ""}</span>
+    <span class="proj"><RepoSwitcher compact /></span>
   </header>
   <div class="filter">
     <input class="field" placeholder={t("explorer.filter")} bind:value={filter} onkeydown={(e) => {
@@ -178,6 +180,13 @@
     align-items: baseline;
     justify-content: space-between;
     padding: 14px 14px 8px;
+  }
+  .proj {
+    display: flex;
+    flex: 1;
+    justify-content: flex-end;
+    min-width: 0;
+    margin-left: var(--s2);
   }
   .title {
     font-size: 11.5px;

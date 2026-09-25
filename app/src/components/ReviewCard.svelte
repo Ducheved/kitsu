@@ -1,11 +1,13 @@
 <script lang="ts">
   import { app } from "../lib/app.svelte";
-  import { api, errorKind, errorText } from "../lib/api";
+  import { errorKind, errorText } from "../lib/api";
   import { t } from "../lib/i18n/index.svelte";
   import { checkWord, spent, tokenParams } from "../lib/status";
   import type { Accepted, Review, Run } from "../lib/types";
   import Fox from "./Fox.svelte";
   import RunActivity from "./RunActivity.svelte";
+  // This project's commands, fixed for as long as the component lives.
+  const api = app.api;
 
   let { run, taskId, fresh = false }: { run: Run; taskId: string; fresh?: boolean } = $props();
 

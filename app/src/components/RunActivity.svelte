@@ -1,10 +1,12 @@
 <script lang="ts">
   import { app } from "../lib/app.svelte";
-  import { api, errorText } from "../lib/api";
+  import { errorText } from "../lib/api";
   import { i18n, t } from "../lib/i18n/index.svelte";
   import { duration, usageText } from "../lib/status";
   import { render } from "../lib/md";
   import type { Evidence, Run, RunEvent } from "../lib/types";
+  // This project's commands, fixed for as long as the component lives.
+  const api = app.api;
 
   let { runId, live = false, compact = false }: { runId: string; live?: boolean; compact?: boolean } = $props();
 

@@ -1,10 +1,13 @@
 <script lang="ts">
   import { app } from "../lib/app.svelte";
-  import { api, errorText } from "../lib/api";
+  import { errorText } from "../lib/api";
   import { t } from "../lib/i18n/index.svelte";
   import { statusText } from "../lib/status";
   import Fox, { type FoxState } from "./Fox.svelte";
   import Glyph from "./Glyph.svelte";
+  import AddProject from "./AddProject.svelte";
+  // This project's commands, fixed for as long as the component lives.
+  const api = app.api;
 
   const ov = $derived(app.overview);
   const needs = $derived((ov?.tasks ?? []).filter((x) => x.attention === "needs_you"));
@@ -15,7 +18,7 @@
   async function trust() {
     try {
       await api.trustRepo();
-      await app.refresh();
+      app.changed(api.repo);
     } catch (e) {
       app.notify(errorText(e), "bad");
     }
@@ -24,7 +27,7 @@
   async function init() {
     try {
       await api.initRepo();
-      await app.refresh();
+      app.changed(api.repo);
     } catch (e) {
       app.notify(errorText(e), "bad");
     }
@@ -32,7 +35,14 @@
 </script>
 
 <div class="home">
-  {#if app.loadError}
+  {#if app.started && !app.repo && !app.loadError}
+    <div class="card welcome">
+      <Fox state="idle" size={48} />
+      <h1>{t("home.noProjects")}</h1>
+      <p>{@html t("home.noProjectsBody", { key: "<kbd>⌘O</kbd>" })}</p>
+      <AddProject focus />
+    </div>
+  {:else if app.loadError}
     <div class="card">
       <h1>{t("home.cantOpen")}</h1>
       <p class="tone-bad">{app.loadError}</p>
@@ -114,6 +124,18 @@
   }
   .card {
     margin-bottom: var(--s4);
+  }
+  .welcome {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+  }
+  .welcome h1 {
+    margin: var(--s2) 0 0;
+  }
+  .welcome p {
+    margin: 0 0 var(--s2);
+    color: var(--muted);
   }
   .trust {
     display: flex;

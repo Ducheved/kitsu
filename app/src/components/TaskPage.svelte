@@ -1,6 +1,6 @@
 <script lang="ts">
   import { app } from "../lib/app.svelte";
-  import { api, errorText } from "../lib/api";
+  import { errorText } from "../lib/api";
   import { i18n, t } from "../lib/i18n/index.svelte";
   import { inline, render } from "../lib/md";
   import { estimateTokens, runWord, statusText, tokenParams } from "../lib/status";
@@ -9,6 +9,8 @@
   import Glyph from "./Glyph.svelte";
   import ReviewCard from "./ReviewCard.svelte";
   import RunActivity from "./RunActivity.svelte";
+  // This project's commands, fixed for as long as the component lives.
+  const api = app.api;
 
   let { id }: { id: string } = $props();
 

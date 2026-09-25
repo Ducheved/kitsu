@@ -1,12 +1,14 @@
 <script lang="ts">
   import { app } from "../lib/app.svelte";
-  import { api } from "../lib/api";
   import type { Attention, TaskView } from "../lib/types";
   import { t } from "../lib/i18n/index.svelte";
   import { inline } from "../lib/md";
   import { digestText, statusText } from "../lib/status";
   import Fox from "./Fox.svelte";
   import Glyph from "./Glyph.svelte";
+  import RepoSwitcher from "./RepoSwitcher.svelte";
+  // This project's commands, fixed for as long as the component lives.
+  const api = app.api;
 
   let { filter = $bindable(""), filtering = $bindable(false) }: { filter?: string; filtering?: boolean } = $props();
 
@@ -44,10 +46,7 @@
 
 <aside class="rail">
   <header>
-    <div class="repo">
-      <span class="name">{ov?.repo.name ?? "Kitsu"}</span>
-      {#if ov?.repo.branch}<span class="branch mono">{ov.repo.branch}</span>{/if}
-    </div>
+    <RepoSwitcher />
     {#if app.preview}<span class="pill dim" title={t("app.previewHint")}>{t("app.preview")}</span>{/if}
   </header>
 
@@ -154,23 +153,6 @@
     gap: var(--s2);
     padding: var(--s5) var(--s5) var(--s3);
     -webkit-app-region: drag;
-  }
-  .repo {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    min-width: 0;
-  }
-  .name {
-    font-weight: 650;
-    font-size: 15px;
-  }
-  .branch {
-    color: var(--muted);
-    font-size: 12px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .filter {
     padding: 0 var(--s3) var(--s2);

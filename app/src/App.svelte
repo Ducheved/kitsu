@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { app } from "./lib/app.svelte";
-  import { api, errorText } from "./lib/api";
+  import { errorText } from "./lib/api";
+  import { digitOf, projectAtKey } from "./lib/repos";
   import { buffers } from "./lib/buffers.svelte";
   import { LOCALES, i18n, t } from "./lib/i18n/index.svelte";
   import type { Command } from "./lib/types";
@@ -17,6 +18,7 @@
   import StatusBar from "./components/StatusBar.svelte";
   import TaskPage from "./components/TaskPage.svelte";
   import PlanPage from "./components/PlanPage.svelte";
+  import TreePage from "./components/TreePage.svelte";
   import Fox from "./components/Fox.svelte";
   import Paws from "./components/Paws.svelte";
   import Tour from "./components/Tour.svelte";
@@ -63,6 +65,8 @@
       cmd("rules", t("cmd.rules"), () => app.go({ kind: "rules" }), "g r"),
       cmd("plan", t("cmd.plan"), () => app.go({ kind: "plan" }), "g p"),
       cmd("home", t("cmd.home"), () => app.go({ kind: "home" }), "g h"),
+      cmd("switchProject", t("cmd.switchProject"), later(() => app.toggleSwitcher()), "⌘O"),
+      cmd("addFolder", t("cmd.addFolder"), later(() => ((app.addingProject = true), (app.overlay = "settings")))),
       cmd("open", t("cmd.open"), later(() => (app.overlay = "files")), "⌘P"),
       cmd("mode", code ? t("cmd.work") : t("cmd.code"), () => app.setMode(code ? "work" : "code"), code ? "⌘1" : "⌘2"),
       cmd("checks", t("cmd.checks"), () => void runAllChecks()),
@@ -78,7 +82,13 @@
     for (const [code, name] of Object.entries(LOCALES) as [keyof typeof LOCALES, string][]) {
       if (code !== i18n.locale) c.push(cmd(`lang:${code}`, t("cmd.language", { language: name }), () => void app.setLang(code)));
     }
-    if (app.overview && !app.overview.repo.trusted) c.unshift(cmd("trust", t("cmd.trust"), () => void api.trustRepo().then(() => app.refresh())));
+    if (app.overview && !app.overview.repo.trusted) c.unshift(cmd("trust", t("cmd.trust"), () => void app.api.trustRepo().then(() => app.changed())));
+    if (app.repo) c.splice(4, 0, cmd("tree", t("cmd.tree"), () => app.go({ kind: "tree" }), "g b"));
+    app.projects.forEach((p, i) => {
+      if (p.id === app.repo) return;
+      const facts = [p.branch ?? t("project.detached"), p.needs_you ? t("project.needs", { n: p.needs_you }) : "", i < 9 ? `⌥${i + 1}` : ""].filter(Boolean);
+      c.push({ id: `project:${p.id}`, title: t("cmd.switchTo", { name: p.name }), hint: facts.join(" · "), group: "projects", run: () => void app.switchTo(p.id) });
+    });
     for (const a of app.overview?.agents ?? []) {
       if (a.name !== app.prefs.agent) c.push(cmd(`agent:${a.name}`, t("cmd.useAgent", { agent: a.name }), () => ((app.prefs.agent = a.name), app.savePrefs()), a.command));
     }
@@ -87,7 +97,7 @@
 
   async function runAllChecks() {
     try {
-      const out = await api.runChecks();
+      const out = await app.api.runChecks();
       const bad = out.filter((e) => e.outcome !== "pass");
       app.notify(bad.length ? t("cmd.failing", { names: i18n.list(bad.map((b) => b.check_name)) }) : t("rules.allPass", { n: out.length }), bad.length ? "bad" : "ok");
       app.changed();
@@ -123,6 +133,20 @@
       e.preventDefault();
       app.overlay = "files";
       return;
+    }
+    if (mod && e.key.toLowerCase() === "o") {
+      e.preventDefault();
+      app.toggleSwitcher();
+      return;
+    }
+    // ⌥1…⌥9: straight to that project. `code`, since ⌥ on a Mac types ¡™£….
+    if (e.altKey && !mod && !app.overlay) {
+      const id = projectAtKey(app.projects, digitOf(e) ?? "");
+      if (id) {
+        e.preventDefault();
+        void app.switchTo(id);
+        return;
+      }
     }
     if (mod && e.key === ",") {
       e.preventDefault();
@@ -167,6 +191,7 @@
       if (e.key === "r") app.go({ kind: "rules" });
       else if (e.key === "h") app.go({ kind: "home" });
       else if (e.key === "p") app.go({ kind: "plan" });
+      else if (e.key === "b" && app.repo) app.go({ kind: "tree" });
       e.preventDefault();
       return;
     }
@@ -229,7 +254,7 @@
             const run = task.status.run;
             const ask = app.overview?.asks.find((a) => a.run === run);
             const opt = ask?.request.options[Number(e.key) - 1];
-            if (ask && opt) void api.answerAsk(ask.id, opt.optionId).then(() => app.changed());
+            if (ask && opt) void app.api.answerAsk(ask.id, opt.optionId).then(() => app.changed());
           }
         } else return;
     }
@@ -250,6 +275,8 @@
     <RulesPage bind:this={rulesPage} />
   {:else if app.view.kind === "plan"}
     <PlanPage bind:this={planPage} />
+  {:else if app.view.kind === "tree"}
+    <TreePage />
   {:else if app.view.kind === "diff"}
     {#await diffPage() then m}<m.default run={app.view.run} path={app.view.path} />{/await}
   {:else}
@@ -258,25 +285,29 @@
 {/snippet}
 
 <div class="app" class:code class:no-tree={code && !app.prefs.tree} class:no-strip={code && !app.prefs.strip}>
-  {#if code}
-    {#if app.prefs.tree}<Explorer bind:this={explorer} />{/if}
-  {:else}
-    <Rail bind:filter bind:filtering />
-  {/if}
-  <main class="scroll" class:flush={showEditor || app.view.kind === "diff" || app.view.kind === "plan"} style:grid-column={mainColumn}>
-    {#key viewKey}
-      <div class="view" class:fill={showEditor || app.view.kind === "diff" || app.view.kind === "plan"}>{@render page()}</div>
-    {/key}
-  </main>
-  <!-- Same grid cell as main, laid over its bottom-right corner. Not over the
-       editor, a diff or the plan canvas, which run to the edge. They walk in once at
-       start and again after each accept. -->
-  {#if app.prefs.paws && !showEditor && app.view.kind !== "diff" && app.view.kind !== "plan"}
-    <div class="corner" style:grid-column={mainColumn} aria-hidden="true">
-      {#key app.accepted}<span class="trail"><Paws count={7} heading={-38} size={18} walk delay={app.accepted ? 700 : 300} /></span>{/key}
-    </div>
-  {/if}
-  {#if code && app.prefs.strip}<AgentStrip />{/if}
+  <!-- One project at a time: switching remounts what shows it, so each
+       component keeps talking to the project it was made for. -->
+  {#key app.repo}
+    {#if code}
+      {#if app.prefs.tree}<Explorer bind:this={explorer} />{/if}
+    {:else}
+      <Rail bind:filter bind:filtering />
+    {/if}
+    <main class="scroll" class:flush={showEditor || app.view.kind === "diff" || app.view.kind === "plan"} style:grid-column={mainColumn}>
+      {#key viewKey}
+        <div class="view" class:fill={showEditor || app.view.kind === "diff" || app.view.kind === "plan"}>{@render page()}</div>
+      {/key}
+    </main>
+    <!-- Same grid cell as main, laid over its bottom-right corner. Not over the
+         editor, a diff or the plan canvas, which run to the edge. They walk in once at
+         start and again after each accept. -->
+    {#if app.prefs.paws && !showEditor && app.view.kind !== "diff" && app.view.kind !== "plan"}
+      <div class="corner" style:grid-column={mainColumn} aria-hidden="true">
+        {#key app.accepted}<span class="trail"><Paws count={7} heading={-38} size={18} walk delay={app.accepted ? 700 : 300} /></span>{/key}
+      </div>
+    {/if}
+    {#if code && app.prefs.strip}<AgentStrip />{/if}
+  {/key}
   <div class="status"><StatusBar /></div>
 </div>
 

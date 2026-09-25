@@ -1,8 +1,14 @@
 <script lang="ts">
   import { app, type Layout, type Theme } from "../lib/app.svelte";
   import { LOCALES, type Locale, systemLocale, t } from "../lib/i18n/index.svelte";
+  import ProjectList from "./ProjectList.svelte";
 
   const themes: Theme[] = ["system", "light", "dark"];
+  function close() {
+    app.overlay = null;
+    app.addingProject = false;
+  }
+
   const layouts: Layout[] = ["adaptive", "work", "code"];
   const layoutHint: Record<Layout, "layout.adaptiveHint" | "layout.workHint" | "layout.codeHint"> = {
     adaptive: "layout.adaptiveHint",
@@ -11,9 +17,14 @@
   };
 </script>
 
-<div class="scrim" role="presentation" onclick={() => (app.overlay = null)}>
-  <div class="sheet" role="dialog" aria-label={t("settings.title")} tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === "Escape" && (app.overlay = null)}>
+<div class="scrim" role="presentation" onclick={close}>
+  <div class="sheet" role="dialog" aria-label={t("settings.title")} tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === "Escape" && close()}>
     <h2>{t("settings.title")}</h2>
+
+    <section>
+      <h3>{t("settings.projects")}</h3>
+      <ProjectList />
+    </section>
 
     <section>
       <h3>{t("settings.language")}</h3>
