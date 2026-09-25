@@ -262,7 +262,7 @@
        start and again after each accept. -->
   {#if app.prefs.paws && !showEditor && app.view.kind !== "diff"}
     <div class="corner" style:grid-column={mainColumn} aria-hidden="true">
-      {#key app.accepted}<span class="trail"><Paws count={5} heading={-38} size={11} walk delay={app.accepted ? 700 : 300} /></span>{/key}
+      {#key app.accepted}<span class="trail"><Paws count={7} heading={-38} size={18} walk delay={app.accepted ? 700 : 300} /></span>{/key}
     </div>
   {/if}
   {#if code && app.prefs.strip}<AgentStrip />{/if}
@@ -290,7 +290,7 @@
     <div class="toast {app.toast.tone}" role="status">
       {#if app.toast.cheer}<Fox state="happy" size={28} />{/if}
       <span>{app.toast.text}</span>
-      {#if app.toast.cheer && app.prefs.paws}<span class="leaving"><Paws count={3} heading={90} size={9} walk delay={450} /></span>{/if}
+      {#if app.toast.cheer && app.prefs.paws}<span class="leaving"><Paws count={4} heading={90} size={12} walk delay={450} /></span>{/if}
     </div>
   {/key}
 {/if}
@@ -339,7 +339,7 @@
   .trail {
     display: none;
   }
-  @container (min-width: 900px) {
+  @container (min-width: 1000px) {
     .trail {
       display: block;
     }
