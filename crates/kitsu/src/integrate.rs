@@ -124,7 +124,7 @@ fn rule_problems(git: &Git, rev: &str) -> Result<Vec<String>> {
         .collect())
 }
 
-fn protected_diff_token(
+pub(crate) fn protected_diff_token(
     git: &Git,
     from: &str,
     to: &str,

@@ -140,7 +140,7 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
             out,
             "- Check `{}` passes: `{}` (required by {}).{}",
             r.name,
-            def.run,
+            def.shown_command(),
             r.why.join(", "),
             at_base.unwrap_or_default()
         );

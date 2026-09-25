@@ -11,9 +11,11 @@ use serde_json::json;
 use crate::agents;
 use crate::brief::{self, Context};
 use crate::check::{CheckRun, CheckStatus, status_at};
+use crate::contract;
 use crate::digest;
 use crate::error::{Error, Result};
 use crate::git::Git;
+use crate::hooks::{self, Vendor};
 use crate::integrate::{self, AcceptOptions, Accepted};
 use crate::intent::{self, Intent, Kind, QuestionState};
 use crate::recover;
@@ -200,6 +202,42 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<WorkspacesCmd>,
     },
+    /// Called by an agent's own hooks (see `kitsu hooks install`): the stop
+    /// gate runs the checks a change needs, the pre-tool gate refuses edits
+    /// to rule paths. Reads the hook's JSON on stdin.
+    Gate {
+        #[command(subcommand)]
+        cmd: GateCmd,
+    },
+    /// Put the gates into Claude Code's, Codex's and Cursor's project hook
+    /// configs (merged into what's there), or take them out.
+    Hooks {
+        #[command(subcommand)]
+        cmd: HooksCmd,
+    },
+    /// Classify what a range changed: code, or rule changes that need an
+    /// approval of exactly their diff (whose hash this prints). RANGE is
+    /// `base..head`, or `base` alone for base to the files on disk.
+    Diff { range: String },
+    /// For a pull request build: run the checks the diff needs on the
+    /// checkout, flag unapproved rule changes, print receipts. Exit 2 if a
+    /// check fails, 3 if a rule change isn't approved.
+    Ci {
+        /// Diff against this (default: the merge commit's first parent, or
+        /// origin/$GITHUB_BASE_REF).
+        #[arg(long)]
+        base: Option<String>,
+        /// The rule-change hash a person approved for this change.
+        #[arg(long)]
+        approved_rule_diff: Option<String>,
+        /// Also run these checks.
+        #[arg(long, value_delimiter = ',')]
+        require: Vec<String>,
+        /// `fail` (default) or `report`: whether an unapproved rule change
+        /// fails the build or is only reported.
+        #[arg(long, default_value = "fail")]
+        rule_changes: String,
+    },
     /// Search the code at a commit (default HEAD). Builds or refreshes the
     /// local index first; only files that changed are read.
     Search {
@@ -224,6 +262,65 @@ pub enum WorkspacesCmd {
     },
     /// Take a project off the list, by id, path or name. Its files stay.
     Remove { project: String },
+}
+
+#[derive(Subcommand)]
+pub enum GateCmd {
+    /// For a Stop / TaskCompleted / stop hook: block with what fails, or
+    /// let the agent finish.
+    Stop {
+        #[arg(long = "for", value_enum)]
+        vendor: Vendor,
+        /// Judge the change from this commit (also $KITSU_GATE_BASE).
+        #[arg(long)]
+        base: Option<String>,
+        /// Also require this task's acceptance checks (automatic inside a
+        /// Kitsu run's worktree).
+        #[arg(long)]
+        task: Option<String>,
+        /// Refusals in a row before the agent may stop anyway, reported
+        /// as not verified.
+        #[arg(long, default_value_t = 5)]
+        max_blocks: u32,
+    },
+    /// For a PreToolUse / preToolUse hook: deny edits to rule paths.
+    PreTool {
+        #[arg(long = "for", value_enum)]
+        vendor: Vendor,
+    },
+    /// Approve a rule change by the hash of its diff, for the stop gate.
+    /// For you, not for an agent: the hooks refuse this command.
+    Approve { token: String },
+}
+
+#[derive(Subcommand)]
+pub enum HooksCmd {
+    Install {
+        #[arg(
+            long = "for",
+            value_enum,
+            value_delimiter = ',',
+            default_value = "claude,codex,cursor"
+        )]
+        vendors: Vec<Vendor>,
+        /// Show the changes, write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// The kitsu the hooks run (default: `kitsu` on PATH).
+        #[arg(long, default_value = "kitsu")]
+        bin: String,
+    },
+    Uninstall {
+        #[arg(
+            long = "for",
+            value_enum,
+            value_delimiter = ',',
+            default_value = "claude,codex,cursor"
+        )]
+        vendors: Vec<Vendor>,
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -282,6 +379,17 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
     }
     if let Cmd::Arch { cmd } = &cli.cmd {
         return arch_cmd(&cwd, cmd.is_some(), cli.json);
+    }
+    // The repository comes from the hook's input, not from where we were
+    // started (Cursor runs user hooks from ~/.cursor).
+    if let Cmd::Gate {
+        cmd: GateCmd::Stop { .. } | GateCmd::PreTool { .. },
+    } = &cli.cmd
+    {
+        return Ok(gate_cmd(cli.cmd, &cwd));
+    }
+    if let Cmd::Hooks { cmd } = cli.cmd {
+        return hooks_cmd(&cwd, cmd, cli.json).map(|_| ok);
     }
     let ws = Workspace::discover(&cwd)?;
     let json = cli.json;
@@ -383,6 +491,36 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
             crate::mcp::Server::new(ws, run).serve(stdin.lock(), std::io::stdout().lock())
         }
         Cmd::Search { query, limit, rev } => search_cmd(&ws, &query.join(" "), limit, &rev, json),
+        Cmd::Gate {
+            cmd: GateCmd::Approve { token },
+        } => {
+            contract::approve(&ws.open_store()?, &token)?;
+            println!("approved rule change {token}");
+            Ok(())
+        }
+        Cmd::Diff { range } => diff_cmd(&ws, &cwd, &range, json),
+        Cmd::Ci {
+            base,
+            approved_rule_diff,
+            require,
+            rule_changes,
+        } => {
+            let fail_on_rules = match rule_changes.as_str() {
+                "fail" => true,
+                "report" => false,
+                other => {
+                    return Err(Error::Invalid(format!(
+                        "--rule-changes {other}: use fail or report"
+                    )));
+                }
+            };
+            let opts = contract::CiOptions {
+                base,
+                approved: approved_rule_diff,
+                require,
+            };
+            return ci_cmd(&ws, &cwd, &opts, fail_on_rules, json);
+        }
         Cmd::Recover => {
             let store = ws.open_store()?;
             let r = recover::recover(&ws, &store)?;
@@ -399,7 +537,9 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
         | Cmd::Arch { .. }
         | Cmd::Login { .. }
         | Cmd::Logout { .. }
-        | Cmd::Workspaces { .. } => unreachable!("handled above"),
+        | Cmd::Workspaces { .. }
+        | Cmd::Hooks { .. }
+        | Cmd::Gate { .. } => unreachable!("handled above"),
     }
     .map(|_| ok)
 }
@@ -1018,6 +1158,19 @@ fn check(
             if e.outcome != CheckOutcome::Pass
                 && let Some(log) = &e.log
             {
+                // An agent can run `kitsu check` too: a held-out check's
+                // output stays in its log file, out of the terminal.
+                if def.held_out {
+                    eprintln!(
+                        "    {}",
+                        paint(
+                            &format!("held out: output in {}", ws.blobs().path(log).display()),
+                            DIM
+                        )
+                    );
+                    out.push(e);
+                    continue;
+                }
                 let text = ws.blobs().get(log)?;
                 let text = String::from_utf8_lossy(&text);
                 let tail: Vec<&str> = text.lines().rev().take(15).collect();
@@ -1973,6 +2126,207 @@ fn workspaces_cmd(cwd: &Path, cmd: WorkspacesCmd, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---- the contract in other agents' hooks and in CI -------------------------
+
+fn gate_cmd(cmd: Cmd, cwd: &Path) -> std::process::ExitCode {
+    use std::io::{Read, Write};
+    let mut input = String::new();
+    let reply = match std::io::stdin().read_to_string(&mut input) {
+        Err(e) => {
+            eprintln!("kitsu gate: reading the hook input: {e}");
+            return std::process::ExitCode::from(1);
+        }
+        Ok(_) => match cmd {
+            Cmd::Gate {
+                cmd:
+                    GateCmd::Stop {
+                        vendor,
+                        base,
+                        task,
+                        max_blocks,
+                    },
+            } => {
+                let opts = hooks::StopOptions {
+                    base: base.or_else(|| std::env::var("KITSU_GATE_BASE").ok()),
+                    task,
+                    max_blocks,
+                };
+                hooks::gate_stop(vendor, &input, cwd, &opts)
+            }
+            Cmd::Gate {
+                cmd: GateCmd::PreTool { vendor },
+            } => hooks::gate_pre_tool(vendor, &input, cwd),
+            _ => unreachable!("only gates come here"),
+        },
+    };
+    let _ = std::io::stdout().write_all(reply.stdout.as_bytes());
+    let _ = std::io::stderr().write_all(reply.stderr.as_bytes());
+    std::process::ExitCode::from(reply.code)
+}
+
+fn hooks_cmd(cwd: &Path, cmd: HooksCmd, json: bool) -> Result<()> {
+    let root = Git::new(cwd).toplevel()?;
+    let (vendors, dry_run, bin, install) = match cmd {
+        HooksCmd::Install {
+            vendors,
+            dry_run,
+            bin,
+        } => (vendors, dry_run, bin, true),
+        HooksCmd::Uninstall { vendors, dry_run } => (vendors, dry_run, "kitsu".into(), false),
+    };
+    let plans = hooks::plan(&root, &vendors, &bin, install)?;
+    if !dry_run {
+        for p in plans.iter().filter(|p| p.changes()) {
+            p.apply()?;
+        }
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&plans).unwrap_or_default()
+        );
+        return Ok(());
+    }
+    for p in &plans {
+        let rel = p.path.strip_prefix(&root).unwrap_or(&p.path).display();
+        if !p.changes() {
+            println!("{rel}: {}", paint("nothing to change", DIM));
+            continue;
+        }
+        let verb = match (dry_run, &p.after) {
+            (true, _) => "would change",
+            (false, None) => "removed",
+            (false, Some(_)) if p.before.is_none() => "created",
+            (false, Some(_)) => "updated",
+        };
+        println!("{rel}: {verb}");
+        if dry_run {
+            print!("{}", p.diff());
+        }
+    }
+    let written: Vec<String> = plans
+        .iter()
+        .filter(|p| p.changes())
+        .map(|p| p.vendor.config_path().to_string())
+        .collect();
+    if !dry_run && !written.is_empty() {
+        println!(
+            "{} commit {}: hook configs are rules, so until they're committed the stop gate reports them as a rule change",
+            paint("next:", BOLD),
+            written.join(" ")
+        );
+    }
+    if install {
+        if !hooks::on_path(&bin) {
+            println!(
+                "{} `{bin}` is not on PATH here; the agents' hook shells won't find it (use --bin /path/to/kitsu)",
+                paint("warning:", YELLOW)
+            );
+        }
+        let ws = Workspace::discover(cwd)?;
+        if !ws.is_trusted()? {
+            println!(
+                "{} the stop gate runs checks only in a trusted repository: `kitsu trust`",
+                paint("note:", YELLOW)
+            );
+        }
+        if vendors.contains(&Vendor::Codex) {
+            println!(
+                "{} Codex runs a new or changed hook only after you trust it: open /hooks in Codex",
+                paint("note:", YELLOW)
+            );
+        }
+        if vendors.contains(&Vendor::Cursor) && vendors.contains(&Vendor::Claude) {
+            println!(
+                "{} Cursor also runs .claude/settings.json hooks (Settings → Agents → Third-Party Imports); the gate then runs twice, and the second finds the first's evidence",
+                paint("note:", DIM)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn diff_cmd(ws: &Workspace, cwd: &Path, range: &str, json: bool) -> Result<()> {
+    let git = Git::new(Git::new(cwd).toplevel()?);
+    let (from, to) = match range.split_once("..") {
+        Some((a, b)) => (a, (!b.is_empty()).then_some(b)),
+        None => (range, None),
+    };
+    let base = (git.rev(from)?, from.to_string());
+    let (change, after) = match to {
+        Some(to) => {
+            let head = git.rev(to)?;
+            (
+                contract::Change::between(&git, base, head.clone())?,
+                contract::rules_at(&git, &head)?,
+            )
+        }
+        None => (
+            contract::Change::to_worktree(ws, &git, base)?,
+            Intent::load_dir(git.dir())?,
+        ),
+    };
+    let report = contract::diff_report(&git, &change, &after)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap_or_default()
+        );
+    } else {
+        print!("{}", contract::render_diff(&report));
+    }
+    Ok(())
+}
+
+fn ci_cmd(
+    ws: &Workspace,
+    cwd: &Path,
+    opts: &contract::CiOptions,
+    fail_on_rules: bool,
+    json: bool,
+) -> Result<std::process::ExitCode> {
+    if !ws.is_trusted()? {
+        return Err(Error::Denied(
+            "this repository is not trusted; `kitsu ci` runs its checks. `kitsu trust` first (the action does)".into(),
+        ));
+    }
+    let store = ws.open_store()?;
+    let dir = Git::new(cwd).toplevel()?;
+    let report = contract::ci(ws, &store, &dir, opts)?;
+    let text = contract::render_ci(&report);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap_or_default()
+        );
+    } else {
+        print!("{text}");
+    }
+    let append = |var: &str, body: &str| -> Result<()> {
+        if let Some(p) = std::env::var_os(var) {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&p)
+                .map_err(|e| Error::io(var.to_string(), e))?;
+            f.write_all(body.as_bytes())
+                .map_err(|e| Error::io(var.to_string(), e))?;
+        }
+        Ok(())
+    };
+    append("GITHUB_OUTPUT", &contract::github_outputs(&report))?;
+    append("GITHUB_STEP_SUMMARY", &format!("## Kitsu\n\n{text}\n"))?;
+    let code = if !report.failing.is_empty() || !report.broken_rules.is_empty() {
+        2
+    } else if fail_on_rules && report.unapproved_rule_change() {
+        3
+    } else {
+        0
+    };
+    Ok(std::process::ExitCode::from(code))
 }
 
 fn agents_cmd(json: bool) -> Result<()> {

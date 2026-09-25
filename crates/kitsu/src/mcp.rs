@@ -219,7 +219,7 @@ impl Server {
             out.push_str(&format!(
                 "- `{}` ({}): {} on your current files; required by {}\n",
                 r.name,
-                def.run,
+                def.shown_command(),
                 st.word(),
                 r.why.join(", ")
             ));
@@ -278,7 +278,8 @@ impl Server {
             any = true;
             out.push_str(&format!(
                 "\n- must pass: check `{}` guards it (`{}`)\n",
-                c.name, c.run
+                c.name,
+                c.shown_command()
             ));
             for l in excerpt(c.why.as_deref().unwrap_or(""), 8) {
                 out.push_str(&format!("  {l}\n"));
@@ -302,7 +303,11 @@ impl Server {
             c.guards.is_everything() && !c.scope.is_everything() && c.scope.may_overlap(&here)
         }) {
             any = true;
-            out.push_str(&format!("\n- check `{}` covers it: `{}`\n", c.name, c.run));
+            out.push_str(&format!(
+                "\n- check `{}` covers it: `{}`\n",
+                c.name,
+                c.shown_command()
+            ));
         }
         if !any {
             out.push_str("\nNo decision or check names this path specifically. Repository-wide rules are in your brief.\n");

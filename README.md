@@ -128,6 +128,59 @@ command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
 
 Agent commands only ever come from your config, never from the repository.
 
+## Use it with the agent you already have
+
+You don't have to run agents through Kitsu for the rules to hold. The same
+`kitsu.toml` can be enforced inside Claude Code, Codex and Cursor through
+their own hooks, and again on the pull request:
+
+```sh
+kitsu trust
+kitsu hooks install --dry-run      # shows the merge into .claude/settings.json,
+kitsu hooks install                #   .codex/hooks.json, .cursor/hooks.json
+kitsu hooks uninstall              # takes out only what it added
+```
+
+Commit the hook configs it writes: they decide whether the gate runs, so
+they're rule paths too, and uncommitted they count as a rule change.
+
+- **When the agent wants to finish** (`kitsu gate stop`), Kitsu diffs the
+  files on disk against the base, runs the checks whose `guards` the diff
+  touches (reusing evidence for the exact tree), and sends the agent back
+  with the failing output. A change to a rule path (`.kitsu/`, `[protect]`,
+  the hook configs themselves) sends it back until you approve that exact
+  diff: `kitsu gate approve <hash>`. The rules come from the base, so an
+  agent that weakens a check is judged by the check as it was.
+- **Before an edit** (`kitsu gate pre-tool`), writes to rule paths are
+  refused. For shell commands only the obvious is caught (`> tests/x`,
+  `rm`, `sed -i`, `kitsu gate approve`); a script can write any file, which
+  is why the stop gate and CI judge the diff and not the tool calls.
+- **Held-out checks** (`held_out = true`) run from files outside the
+  repository (`$KITSU_HELD_OUT_DIR/<check>`, else your config dir); their
+  command and output never reach the agent. They're out of sight, not
+  secret: an agent with a shell can go and read them.
+- **On a pull request**, the composite action runs `kitsu ci`: the required
+  checks on the checkout, a receipt per check (command fingerprint, tree,
+  exit code, duration), and a failure on rule changes whose hash isn't in
+  `approved-rule-diff`:
+
+```yaml
+- uses: actions/checkout@<sha>
+- uses: Ducheved/kitsu/.github/actions/kitsu@<commit sha>
+  with:
+    approved-rule-diff: ${{ vars.KITSU_APPROVED_RULE_DIFF }}
+```
+
+`kitsu diff main..HEAD` shows the same classification and hash locally.
+
+Limits: hooks are guardrails, not a sandbox. Each vendor caps stop-hook
+retries, and so does the gate (5 in a row, then "not verified"); on its own
+errors it fails open and says so. Codex runs a new hook only after you
+trust it in `/hooks`. Cursor also runs `.claude/settings.json` hooks, so
+with both installed the gate runs twice (the second run reuses the first's
+evidence). The hook JSON was checked against each vendor's docs; no real
+Claude, Codex or Cursor session has run it yet.
+
 ## Kitsu's own agent
 
 Through an external agent, Kitsu can only put advice into someone else's
@@ -284,6 +337,10 @@ checks, decisions and what's next.
 | `kitsu log [-f]` | the event log |
 | `kitsu recover` | settle anything left behind by a crash (also automatic) |
 | `kitsu workspaces [list\|add\|remove]` | the projects the window shows; removing one never touches its files |
+| `kitsu hooks install [--for claude,codex,cursor]` | put the gates into your agents' hook configs (`uninstall` takes them out) |
+| `kitsu gate stop\|pre-tool --for <agent>` | what those hooks call; `kitsu gate approve <hash>` approves a rule change |
+| `kitsu diff <base>..<head>` | code vs rule changes, and the hash an approval must match |
+| `kitsu ci` | a pull request's required checks and rule changes, with receipts |
 
 Add `--json` to any of them.
 
@@ -300,6 +357,7 @@ Verified here means an automated test or a measurement in this repo does it.
 | UI flows and screens | Chromium on fixture data |
 | Kitsu's own loop: fixing the fixture task, false done ×3, compaction at the threshold and after an overflow, crash-and-resume at three points, loop signal, cancel, retries, path confinement, the key never written | 15 end-to-end tests against a scripted model server |
 | Kitsu's own loop on a live model | **once**: the fixture task on OpenRouter; prompt caching measured (71–92% of the prompt from cache on turns 2–5, half the cost; one run, not repeated) |
+| Hooks for Claude Code, Codex and Cursor; `kitsu diff`, `kitsu ci` | unit tests against the vendors' documented hook JSON, 4 end-to-end tests through the binary; **not run inside a real Claude, Codex or Cursor session, and the action hasn't run on GitHub** |
 | **Real agents** (Claude, Codex, Gemini adapters) | **partly**: Claude Code through `kitsu run` against a stub model (compaction probe) |
 | **How good it is on real tasks**, own loop vs Codex vs OpenCode | **not measured yet**; an eval suite with held-out checks is in progress ([roadmap](docs/roadmap.md)) |
 | **macOS and Windows** | **not built or run yet**. Stop on Windows falls back to a 1 s poll; orphan cleanup is Linux-only |

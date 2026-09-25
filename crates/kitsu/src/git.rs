@@ -178,6 +178,22 @@ impl Git {
         }
     }
 
+    /// The commit HEAD's upstream branch points at, if it has one.
+    pub fn upstream(&self) -> Result<Option<String>> {
+        match self.run(["rev-parse", "--verify", "--quiet", "@{upstream}^{commit}"]) {
+            Ok(s) => Ok(Some(s.trim().to_string())),
+            // No upstream configured, or it names a ref that's gone.
+            Err(Error::Git { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The parents of `rev`: two for a merge commit.
+    pub fn parents(&self, rev: &str) -> Result<Vec<String>> {
+        let out = self.run(["rev-list", "--parents", "-n", "1", &self.rev(rev)?])?;
+        Ok(out.split_whitespace().skip(1).map(String::from).collect())
+    }
+
     pub fn tree_of(&self, commit: &str) -> Result<String> {
         Ok(self
             .run(["rev-parse", "--verify", &format!("{commit}^{{tree}}")])?

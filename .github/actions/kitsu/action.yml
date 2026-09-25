@@ -1,0 +1,101 @@
+# The rules in .kitsu/kitsu.toml, enforced on a pull request: the checks
+# whose `guards` the diff touches run on the checkout, and a change to a
+# rule path (.kitsu/, [protect] paths, agents' hook configs) fails the step
+# unless its exact diff hash was approved. The rules come from the base
+# commit, so a pull request that weakens a check is judged by the check as
+# it was.
+#
+#   - uses: actions/checkout@<sha>
+#   - uses: Ducheved/kitsu/.github/actions/kitsu@<commit sha>   # pin a commit
+#     with:
+#       approved-rule-diff: ${{ vars.KITSU_APPROVED_RULE_DIFF }}
+#
+# The kitsu binary is built from the same commit as this action (no
+# download, nothing unpinned), unless `kitsu-bin` names one. No other action
+# is used. Approving through a PR comment or label is not implemented: the
+# approval is the `approved-rule-diff` input (a repository variable, or an
+# input of a manually dispatched run), which only people with write access
+# to the workflow's settings can set.
+name: Kitsu
+description: Run the checks a pull request's diff needs by the base branch's .kitsu/kitsu.toml, and fail on rule changes nobody approved.
+inputs:
+  base:
+    description: Commit to judge the change from. Default is the pull request's base commit.
+    required: false
+    default: ""
+  approved-rule-diff:
+    description: The rule-change hash a maintainer approved (this action prints it, and so does `kitsu diff`). Empty means none is approved.
+    required: false
+    default: ""
+  rule-changes:
+    description: "`fail` (default) or `report`: whether an unapproved rule change fails the step or is only reported in the outputs."
+    required: false
+    default: fail
+  require:
+    description: Comma-separated checks to run even when the diff doesn't touch what they guard.
+    required: false
+    default: ""
+  held-out-dir:
+    description: Directory holding held-out checks' files, one subdirectory per check. It must not be in the checkout.
+    required: false
+    default: ""
+  kitsu-bin:
+    description: Path to a kitsu binary to use instead of building the one at this action's commit.
+    required: false
+    default: ""
+outputs:
+  rule-change:
+    description: "`true` if the change touches a rule path."
+    value: ${{ steps.ci.outputs.rule-change }}
+  rule-diff:
+    description: The hash an approval of this change's rule edits must match; empty without rule changes.
+    value: ${{ steps.ci.outputs.rule-diff }}
+  approved:
+    description: "`true` if there is no rule change or `approved-rule-diff` matches it."
+    value: ${{ steps.ci.outputs.approved }}
+  failing:
+    description: Comma-separated required checks that did not pass.
+    value: ${{ steps.ci.outputs.failing }}
+runs:
+  using: composite
+  steps:
+    - name: Build kitsu at this action's commit
+      if: inputs.kitsu-bin == ''
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        src="$(cd "$ACTION_PATH/../../.." && pwd)"
+        # rust-toolchain.toml there pins the compiler; rustup installs it.
+        (cd "$src" && cargo build --release --locked -p kitsu --bin kitsu)
+        echo "KITSU_BIN=$src/target/release/kitsu" >> "$GITHUB_ENV"
+    - name: Use the given kitsu
+      if: inputs.kitsu-bin != ''
+      shell: bash
+      env:
+        GIVEN: ${{ inputs.kitsu-bin }}
+      run: echo "KITSU_BIN=$GIVEN" >> "$GITHUB_ENV"
+    - id: ci
+      name: Judge the change
+      shell: bash
+      env:
+        BASE: ${{ inputs.base || github.event.pull_request.base.sha }}
+        APPROVED: ${{ inputs.approved-rule-diff }}
+        RULE_CHANGES: ${{ inputs.rule-changes }}
+        REQUIRE: ${{ inputs.require }}
+        HELD_OUT: ${{ inputs.held-out-dir }}
+      run: |
+        set -euo pipefail
+        args=(ci --rule-changes "$RULE_CHANGES")
+        if [ -n "$BASE" ]; then
+          # A shallow checkout may not have the base: its tree holds the rules.
+          git cat-file -e "$BASE^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$BASE"
+          args+=(--base "$BASE")
+        fi
+        if [ -n "$APPROVED" ]; then args+=(--approved-rule-diff "$APPROVED"); fi
+        if [ -n "$REQUIRE" ]; then args+=(--require "$REQUIRE"); fi
+        if [ -n "$HELD_OUT" ]; then export KITSU_HELD_OUT_DIR="$HELD_OUT"; fi
+        export KITSU_CONFIG_DIR="$RUNNER_TEMP/kitsu-config"
+        "$KITSU_BIN" trust
+        "$KITSU_BIN" "${args[@]}"

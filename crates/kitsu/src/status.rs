@@ -226,6 +226,23 @@ pub fn enforcing_checks(intent: &Intent, scope: &Scope) -> Vec<String> {
     out.into_iter().map(str::to_owned).collect()
 }
 
+/// The checks a change needs when there is no task, only a diff (an
+/// agent's hook, a pull request): every check whose `guards` the changed
+/// paths touch. The same rule `required_checks` applies, minus the task.
+pub fn guarded_checks(intent: &Intent, changed: &[String]) -> Vec<RequiredCheck> {
+    intent
+        .config
+        .checks
+        .values()
+        .filter(|c| !c.guards.is_everything())
+        .filter(|c| c.guards.touches_any(changed.iter().map(String::as_str)))
+        .map(|c| RequiredCheck {
+            name: c.name.clone(),
+            why: vec![format!("guards {}", c.guards.globs().join(", "))],
+        })
+        .collect()
+}
+
 pub fn verdict(
     git: &Git,
     store: &Store,
@@ -549,6 +566,9 @@ mod tests {
             names(required_checks(&i, t, Some(&changed))),
             ["docs", "idem", "unit"]
         );
+        // With no task, only what the diff touches: never `unit` or `lint`.
+        assert_eq!(names(guarded_checks(&i, &changed)), ["docs", "idem"]);
+        assert!(guarded_checks(&i, &["README.md".to_string()]).is_empty());
     }
 
     #[test]

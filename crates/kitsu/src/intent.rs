@@ -21,6 +21,17 @@ use crate::util::content_id;
 pub const DIR: &str = ".kitsu";
 pub const CONFIG: &str = ".kitsu/kitsu.toml";
 
+/// The agents' hook configs `kitsu hooks install` writes. They decide
+/// whether the gate runs at all, so changing one is a rule change, like
+/// changing `.kitsu/`.
+pub const HOOK_CONFIGS: &[&str] = &[
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".codex/hooks.json",
+    ".codex/config.toml",
+    ".cursor/hooks.json",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Kind {
     Task,
@@ -92,9 +103,24 @@ pub struct CheckDef {
     /// What the check protects, in words. Goes into the brief of every task
     /// it guards.
     pub why: Option<String>,
+    /// The check's files live outside the repository (see
+    /// `check::held_out_dir`), and its command and output are never shown
+    /// to an agent. Out of sight, not secret: an agent with a shell can
+    /// still go and read them.
+    pub held_out: bool,
 }
 
 impl CheckDef {
+    /// The command as an agent may see it. A held-out check's command can
+    /// name the files it keeps out of sight.
+    pub fn shown_command(&self) -> &str {
+        if self.held_out {
+            "(held out: its tests are not in this repository)"
+        } else {
+            &self.run
+        }
+    }
+
     /// Identity of what the check *does*. Editing the command invalidates old
     /// evidence; editing the freshness scope does not change past results.
     pub fn fingerprint(&self) -> String {
@@ -667,6 +693,7 @@ impl Intent {
 
     pub fn protected(&self) -> Scope {
         let mut globs: Vec<String> = vec![format!("{DIR}/**")];
+        globs.extend(HOOK_CONFIGS.iter().map(|p| p.to_string()));
         globs.extend(self.config.protect.globs().iter().cloned());
         Scope::new(globs)
     }
@@ -1151,6 +1178,8 @@ struct CheckFile {
     #[serde(default)]
     guards: Vec<String>,
     why: Option<String>,
+    #[serde(default)]
+    held_out: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -1198,6 +1227,7 @@ fn parse_config(text: &str) -> Result<Config, String> {
                     .why
                     .map(|w| w.trim().to_string())
                     .filter(|w| !w.is_empty()),
+                held_out: c.held_out,
             },
         );
     }
@@ -1331,6 +1361,24 @@ mod tests {
         assert_eq!(idem.why.as_deref(), Some("One key per charge."));
         let lint = &intent.config.checks["lint"];
         assert!(lint.guards.is_everything() && lint.why.is_none());
+        assert!(!idem.held_out && !lint.held_out);
+    }
+
+    #[test]
+    fn held_out_checks_and_hook_configs() {
+        let intent = Intent::from_files(files(&[(
+            CONFIG,
+            "[checks.hidden]\nrun = \"sh \\\"$KITSU_HELD_OUT/run.sh\\\"\"\nguards = [\"src/**\"]\nheld_out = true\n",
+        )]));
+        assert!(intent.problems.is_empty(), "{:?}", intent.problems);
+        let c = &intent.config.checks["hidden"];
+        assert!(c.held_out);
+        assert!(!c.shown_command().contains("KITSU_HELD_OUT"));
+        // The agents' hook configs decide whether the gate runs: rules.
+        for p in HOOK_CONFIGS {
+            assert!(intent.protected().contains(p), "{p}");
+        }
+        assert!(!intent.protected().contains(".claude/agents/x.md"));
     }
 
     #[test]
@@ -1342,6 +1390,7 @@ mod tests {
             scope: Scope::new(["a/**"]),
             guards: Scope::new(["a/**"]),
             why: None,
+            held_out: false,
         };
         let mut b = a.clone();
         b.guards = Scope::new(["c/**"]);
