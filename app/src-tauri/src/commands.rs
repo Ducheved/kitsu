@@ -248,7 +248,11 @@ pub async fn task_detail(state: State<'_, AppState>, id: String) -> R<Value> {
             .filter(|q| q.blocks.contains(&id))
             .map(|q| json!({ "id": q.id, "title": q.title, "open": q.state == QuestionState::Open, "answer": q.answer, "body": q.body }))
             .collect();
+        // What done means: the task's checks plus every check guarding its
+        // scope, same list the brief gives the agent.
+        let required: Vec<String> = kitsu::status::required_checks(&intent, task, None).into_iter().map(|r| r.name).collect();
         Ok(json!({
+            "required": required,
             "task": { "id": task.id, "title": task.title, "state": state, "scope": task.scope.globs(), "checks": task.checks, "after": task.after, "body": task.body, "path": task.source.path },
             "brief": b,
             "runs": runs,

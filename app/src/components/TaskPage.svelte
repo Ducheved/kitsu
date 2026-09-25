@@ -248,8 +248,8 @@
 
     <div class="section-title">{t("section.told")} <span class="size">{t("told.size", tokenParams(estimateTokens(detail.brief.markdown)))}</span></div>
     <div class="constraints">
-      {#if detail.task.checks.length}
-        <div class="c-row"><span class="c-kind">{t("told.doneWhen")}</span><span>{@html t("told.doneChecks", { checks: detail.task.checks.map((c) => `<code>${c.replace(/[<>&]/g, "")}</code>`).join(", ") })}</span></div>
+      {#if detail.required.length}
+        <div class="c-row"><span class="c-kind">{t("told.doneWhen")}</span><span>{@html t("told.doneChecks", { checks: detail.required.map((c) => `<code>${c.replace(/[<>&]/g, "")}</code>`).join(", ") })}</span></div>
       {:else}
         <div class="c-row"><span class="c-kind">{t("told.doneWhen")}</span><span>{t("told.doneNoChecks")}</span></div>
       {/if}

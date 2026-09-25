@@ -167,6 +167,8 @@ export interface Brief {
 }
 
 export interface TaskDetail {
+  /** The task's checks plus every check that guards its scope. */
+  required: string[];
   task: { id: string; title: string; state: "open" | "done" | "dropped"; scope: string[]; checks: string[]; after: string[]; body: string; path: string };
   brief: Brief;
   runs: Run[];

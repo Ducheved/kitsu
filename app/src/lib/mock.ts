@@ -249,11 +249,14 @@ const handlers: Record<string, (a: Record<string, unknown>) => unknown> = {
   },
   task_detail: (a): TaskDetail => {
     const t = tasks.find((x) => x.id === a.id)!;
+    // Checks that guard payments.py are required for tasks that touch it.
+    const required = [...new Set([...t.checks, ...(t.scope.includes("payments.py") ? ["idempotency"] : [])])].sort();
     return {
+      required,
       task: { ...t, path: `.kitsu/tasks/${t.id}.md` },
       brief: {
         task: t.id,
-        markdown: `# ${t.title}\n\n${t.body}\n\n## Done means\n- Check \`retries\` passes\n\n## Must hold\n- **One idempotency key per logical charge, reused by every retry**`,
+        markdown: `# ${t.title}\n\n${t.body}\n\n## Done means\n${required.map((c) => `- Check \`${c}\` passes`).join("\n")}\n  One idempotency key per logical charge: a retry after a lost response must not charge twice.`,
         included:
           t.id === "webhook-signatures"
             ? [{ kind: "task", id: t.id, title: t.title, path: `.kitsu/tasks/${t.id}.md`, content_id: "a1", why: "the task" }]
@@ -380,7 +383,7 @@ const handlers: Record<string, (a: Record<string, unknown>) => unknown> = {
     ],
     checks: [
       { name: "retries", run: "python3 -m unittest -q test_retries", scope: [], guards: [], why: null, status: { status: "stale", outcome: "fail", evidence: 1, changed: ["payments.py"], more: 0 } },
-      { name: "idempotency", run: "python3 -m unittest -q test_idempotency", scope: ["payments.py"], guards: ["payments.py"], why: "One idempotency key per logical charge, reused by every retry", status: { status: "stale", outcome: "fail", evidence: 2, changed: ["payments.py"], more: 0 } },
+      { name: "idempotency", run: "python3 -m unittest -q test_idempotency", scope: ["payments.py"], guards: ["payments.py"], why: "A retry after a lost response must not charge the card twice", status: { status: "stale", outcome: "fail", evidence: 2, changed: ["payments.py"], more: 0 } },
       { name: "refunds", run: "python3 -m unittest -q test_refunds", scope: [], guards: [], why: null, status: { status: "unverified" } },
     ],
   }),

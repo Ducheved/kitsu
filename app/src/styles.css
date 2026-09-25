@@ -287,3 +287,14 @@ kbd {
   color: var(--faint);
   font-size: 12px;
 }
+
+/* Headings wrap into even lines instead of leaving one word alone;
+   paragraphs avoid a single-word last line. */
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+}
+p {
+  text-wrap: pretty;
+}
