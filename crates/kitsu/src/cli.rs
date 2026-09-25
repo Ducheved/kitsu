@@ -186,6 +186,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<ArchCmd>,
     },
+    /// The projects the desktop window shows (`<config dir>/workspaces.toml`).
+    /// Only the list: removing a project never touches its files.
+    Workspaces {
+        #[command(subcommand)]
+        cmd: Option<WorkspacesCmd>,
+    },
     /// Search the code at a commit (default HEAD). Builds or refreshes the
     /// local index first; only files that changed are read.
     Search {
@@ -195,6 +201,21 @@ enum Cmd {
         #[arg(long, default_value = "HEAD")]
         rev: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum WorkspacesCmd {
+    /// Every project with its branch and what needs you (the default).
+    List,
+    /// Add the repository at PATH (default: the current one).
+    Add {
+        path: Option<PathBuf>,
+        /// Shown instead of the folder name.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Take a project off the list, by id, path or name. Its files stay.
+    Remove { project: String },
 }
 
 #[derive(Subcommand)]
@@ -245,6 +266,9 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
     }
     // Reads the working tree only, so it runs the same in a run's snapshot
     // (where checks run) as in a checkout, with or without a workspace.
+    if let Cmd::Workspaces { cmd } = cli.cmd {
+        return workspaces_cmd(&cwd, cmd.unwrap_or(WorkspacesCmd::List), cli.json).map(|_| ok);
+    }
     if let Cmd::Arch { cmd } = &cli.cmd {
         return arch_cmd(&cwd, cmd.is_some(), cli.json);
     }
@@ -359,7 +383,7 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
             }
             Ok(())
         }
-        Cmd::Agents | Cmd::Arch { .. } => unreachable!("handled above"),
+        Cmd::Agents | Cmd::Arch { .. } | Cmd::Workspaces { .. } => unreachable!("handled above"),
     }
     .map(|_| ok)
 }
@@ -1734,6 +1758,114 @@ fn log(ws: &Workspace, run: Option<String>, since: i64, follow: bool, json: bool
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
     }
+}
+
+fn workspaces_cmd(cwd: &Path, cmd: WorkspacesCmd, json: bool) -> Result<()> {
+    use crate::workspaces::{self, Entry, List};
+    let list = List::new(List::default_path());
+    match cmd {
+        WorkspacesCmd::List => {
+            let entries = list.load()?;
+            let all = workspaces::overview(&entries);
+            if json {
+                println!("{}", json!(all));
+                return Ok(());
+            }
+            if all.is_empty() {
+                println!("No projects yet. `kitsu workspaces add <path>` adds one.");
+            }
+            for s in all {
+                let mut facts = Vec::new();
+                if let Some(e) = &s.error {
+                    facts.push(paint(e, RED));
+                } else {
+                    if s.needs_you > 0 {
+                        facts.push(paint(&format!("{} need you", s.needs_you), YELLOW));
+                    }
+                    if s.working > 0 {
+                        facts.push(format!("{} working", s.working));
+                    }
+                    if s.ready > 0 {
+                        facts.push(format!("{} ready", s.ready));
+                    }
+                    if !s.trusted {
+                        facts.push(paint("untrusted", YELLOW));
+                    }
+                    if !s.initialized {
+                        facts.push(paint("no .kitsu/ yet", DIM));
+                    }
+                }
+                println!(
+                    "{}  {:<16} {:<14} {}",
+                    paint(&s.id, DIM),
+                    s.name,
+                    s.branch.as_deref().unwrap_or("(detached)"),
+                    facts.join(", ")
+                );
+                println!("{}  {}", " ".repeat(s.id.len()), paint(&s.root, DIM));
+            }
+        }
+        WorkspacesCmd::Add { path, name } => {
+            let folder = match path {
+                Some(p) if p.is_absolute() => p,
+                Some(p) => cwd.join(p),
+                None => cwd.to_path_buf(),
+            };
+            let (e, _) = list.add(&folder, name.as_deref(), false)?;
+            if json {
+                println!(
+                    "{}",
+                    json!({ "id": e.id(), "name": e.display_name(), "root": e.root })
+                );
+            } else {
+                println!("added {} ({})", e.display_name(), e.root.display());
+                if !Workspace::open(&e.root)?.is_trusted()? {
+                    println!(
+                        "{}",
+                        paint(
+                            "not trusted yet: it opens read-only until you trust it",
+                            DIM
+                        )
+                    );
+                }
+            }
+        }
+        WorkspacesCmd::Remove { project } => {
+            let entries = list.load()?;
+            let as_path = std::fs::canonicalize(cwd.join(&project)).ok();
+            let hits: Vec<&Entry> = entries
+                .iter()
+                .filter(|e| {
+                    e.id() == project
+                        || e.display_name() == project
+                        || as_path.as_deref() == Some(e.root.as_path())
+                })
+                .collect();
+            let e = match hits.as_slice() {
+                [one] => (*one).clone(),
+                [] => {
+                    return Err(Error::NotFound(format!("no project {project} in the list")));
+                }
+                _ => {
+                    return Err(Error::Invalid(format!(
+                        "{project} matches {} projects; use the id from `kitsu workspaces list`",
+                        hits.len()
+                    )));
+                }
+            };
+            list.remove(&e.id())?;
+            if json {
+                println!("{}", json!({ "removed": e.id(), "root": e.root }));
+            } else {
+                println!(
+                    "removed {} from the list; {} is untouched",
+                    e.display_name(),
+                    e.root.display()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn agents_cmd(json: bool) -> Result<()> {

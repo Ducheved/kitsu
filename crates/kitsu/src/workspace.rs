@@ -66,6 +66,32 @@ impl Workspace {
         Ok(Workspace { root, state })
     }
 
+    /// Open the repository whose main worktree is `root`, as recorded in the
+    /// workspaces list. The usual layout (`<root>/.git` is a directory)
+    /// needs no git process; anything else goes through `discover`.
+    pub fn open(root: &Path) -> Result<Workspace> {
+        let dot_git = root.join(".git");
+        if dot_git.is_dir() {
+            return Ok(Workspace {
+                root: root.to_path_buf(),
+                state: dot_git.join("kitsu"),
+            });
+        }
+        Workspace::discover(root)
+    }
+
+    /// The main worktree's branch, `None` when detached. Read from
+    /// `.git/HEAD` when that's a plain file, so polling many repositories
+    /// doesn't spawn git for each; otherwise asks git.
+    pub fn current_branch(&self) -> Result<Option<String>> {
+        let head = self.root.join(".git").join("HEAD");
+        if let Ok(text) = std::fs::read_to_string(&head) {
+            let text = text.trim();
+            return Ok(text.strip_prefix("ref: refs/heads/").map(String::from));
+        }
+        self.git().current_branch()
+    }
+
     /// Serializes `git worktree add/remove/prune` across every Kitsu process
     /// on this clone. Git's worktree commands are not safe to run
     /// concurrently: under load, one process can read another's
@@ -363,6 +389,32 @@ mod tests {
         assert_eq!(from_wt.run_for_path(&wt).as_deref(), Some("r1"));
         // And the main worktree's status does not see it.
         assert!(repo.git().is_clean().expect("clean"));
+    }
+
+    #[test]
+    fn open_and_current_branch_agree_with_git() {
+        let repo = TempRepo::new(&[("a", "a")]);
+        let ws = Workspace::open(&repo.root).expect("open");
+        let found = Workspace::discover(&repo.root).expect("discover");
+        assert_eq!(
+            std::fs::canonicalize(&ws.state).ok(),
+            std::fs::canonicalize(&found.state).ok()
+        );
+        assert_eq!(
+            ws.current_branch().expect("branch").as_deref(),
+            Some("main")
+        );
+        repo.git()
+            .run(["switch", "--quiet", "-c", "feature/x"])
+            .expect("switch");
+        assert_eq!(
+            ws.current_branch().expect("branch"),
+            repo.git().current_branch().expect("git")
+        );
+        repo.git()
+            .run(["switch", "--quiet", "--detach"])
+            .expect("detach");
+        assert_eq!(ws.current_branch().expect("detached"), None);
     }
 
     #[test]

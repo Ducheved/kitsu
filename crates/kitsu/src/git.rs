@@ -401,6 +401,24 @@ impl Git {
             .collect())
     }
 
+    /// Every worktree git knows about, main one first. Callers that may race
+    /// a `worktree add` should hold `Workspace::lock_worktrees` around this.
+    pub fn worktrees(&self) -> Result<Vec<WorktreeInfo>> {
+        let out = self.run(["worktree", "list", "--porcelain", "-z"])?;
+        Ok(parse_worktrees(&out))
+    }
+
+    /// Local branches with their upstream and how far apart they are. One
+    /// `for-each-ref`; git computes ahead/behind itself.
+    pub fn branches(&self) -> Result<Vec<BranchInfo>> {
+        let out = self.run([
+            "for-each-ref",
+            "--format=%(HEAD)%00%(refname:short)%00%(objectname:short)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(contents:subject)",
+            "refs/heads",
+        ])?;
+        Ok(out.lines().filter_map(parse_branch).collect())
+    }
+
     pub fn prune_worktrees(&self) -> Result<()> {
         self.run(["worktree", "prune"]).map(|_| ())
     }
@@ -653,6 +671,106 @@ fn parse_batch(mut out: &[u8], oids: &[String]) -> Result<Vec<Vec<u8>>> {
     Ok(files)
 }
 
+/// One entry of `git worktree list --porcelain`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WorktreeInfo {
+    pub path: PathBuf,
+    pub head: Option<String>,
+    /// Short branch name; `None` when detached or bare.
+    pub branch: Option<String>,
+    pub bare: bool,
+    pub locked: bool,
+    /// Git thinks the directory is gone.
+    pub prunable: bool,
+}
+
+fn parse_worktrees(out: &str) -> Vec<WorktreeInfo> {
+    let mut all = Vec::new();
+    let mut cur: Option<WorktreeInfo> = None;
+    // Records are NUL-terminated lines; an empty line ends a worktree.
+    for line in out.split('\0') {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            all.extend(cur.take());
+            cur = Some(WorktreeInfo {
+                path: PathBuf::from(p),
+                head: None,
+                branch: None,
+                bare: false,
+                locked: false,
+                prunable: false,
+            });
+            continue;
+        }
+        let Some(w) = cur.as_mut() else { continue };
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        match key {
+            "HEAD" => w.head = Some(value.to_string()),
+            "branch" => {
+                w.branch = Some(
+                    value
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(value)
+                        .to_string(),
+                );
+            }
+            "bare" => w.bare = true,
+            "locked" => w.locked = true,
+            "prunable" => w.prunable = true,
+            _ => {}
+        }
+    }
+    all.extend(cur);
+    all
+}
+
+/// One local branch, from `for-each-ref`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BranchInfo {
+    pub name: String,
+    pub head: String,
+    pub current: bool,
+    pub upstream: Option<String>,
+    /// Commits here that the upstream doesn't have. `None` without an
+    /// upstream, or when the upstream is gone.
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+    /// The upstream branch was deleted on the remote.
+    pub gone: bool,
+    /// Committer date of the tip, Unix seconds.
+    pub date: i64,
+    pub subject: String,
+}
+
+fn parse_branch(line: &str) -> Option<BranchInfo> {
+    let f: Vec<&str> = line.splitn(7, '\0').collect();
+    let [head_mark, name, oid, upstream, track, date, subject] = f.as_slice() else {
+        return None;
+    };
+    let upstream = (!upstream.is_empty()).then(|| upstream.to_string());
+    let gone = *track == "gone";
+    // "ahead 2, behind 1" / "ahead 2" / "behind 1" / "" (in sync).
+    let mut ahead = upstream.as_ref().filter(|_| !gone).map(|_| 0);
+    let mut behind = ahead;
+    for part in track.split(", ") {
+        if let Some(n) = part.strip_prefix("ahead ") {
+            ahead = n.parse().ok();
+        } else if let Some(n) = part.strip_prefix("behind ") {
+            behind = n.parse().ok();
+        }
+    }
+    Some(BranchInfo {
+        name: name.to_string(),
+        head: oid.to_string(),
+        current: *head_mark == "*",
+        upstream,
+        ahead,
+        behind,
+        gone,
+        date: date.parse().unwrap_or(0),
+        subject: subject.to_string(),
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use super::Git;
@@ -860,5 +978,58 @@ mod tests {
         let res = git.merge_squash(&side).expect("merge ran");
         assert_eq!(res, Err(vec!["a.txt".to_string()]));
         assert!(git.is_clean().expect("status"));
+    }
+
+    #[test]
+    fn branches_report_upstream_distance() {
+        let repo = TempRepo::new(&[("a.txt", "1\n")]);
+        let git = repo.git();
+        git.run(["branch", "feature"]).expect("branch");
+        git.run(["branch", "--set-upstream-to=main", "feature"])
+            .expect("upstream");
+        git.run(["switch", "--quiet", "feature"]).expect("switch");
+        repo.write("a.txt", "2\n");
+        repo.commit_all("ahead one");
+        git.run(["switch", "--quiet", "main"]).expect("switch");
+        repo.write("b.txt", "1\n");
+        repo.commit_all("main moves");
+        repo.write("b.txt", "2\n");
+        repo.commit_all("main moves again");
+
+        let all = git.branches().expect("branches");
+        let names: Vec<&str> = all.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["feature", "main"]);
+        let feature = &all[0];
+        assert!(!feature.current);
+        assert_eq!(feature.upstream.as_deref(), Some("main"));
+        assert_eq!((feature.ahead, feature.behind), (Some(1), Some(2)));
+        assert_eq!(feature.subject, "ahead one");
+        let main = &all[1];
+        assert!(main.current);
+        assert_eq!(
+            (main.upstream.as_ref(), main.ahead, main.behind),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn worktrees_parse_porcelain() {
+        let out = "worktree /r\0HEAD aaa\0branch refs/heads/main\0\0\
+                   worktree /r/.git/kitsu/worktrees/r1\0HEAD bbb\0detached\0locked\0\0\
+                   worktree /gone\0HEAD ccc\0branch refs/heads/x/y\0prunable gitdir file points to non-existent location\0\0";
+        let w = super::parse_worktrees(out);
+        assert_eq!(w.len(), 3);
+        assert_eq!(w[0].branch.as_deref(), Some("main"));
+        assert_eq!(w[1].branch, None);
+        assert!(w[1].locked && !w[1].prunable);
+        assert_eq!(w[2].branch.as_deref(), Some("x/y"));
+        assert!(w[2].prunable);
+
+        let repo = TempRepo::new(&[]);
+        let wt = repo.root.join("wt");
+        repo.git().worktree_add(&wt, "side", "HEAD").expect("add");
+        let live = repo.git().worktrees().expect("list");
+        assert_eq!(live.len(), 2);
+        assert_eq!(live[1].branch.as_deref(), Some("side"));
     }
 }
