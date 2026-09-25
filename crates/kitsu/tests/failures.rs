@@ -223,6 +223,52 @@ fn good_change_is_verified_accepted_and_closes_the_task() {
 }
 
 #[test]
+fn a_change_no_check_looks_at_is_unknown_not_green() {
+    let env = Env::new("unguarded");
+    // `retries` looks at the whole repository until it says otherwise.
+    let toml = env.repo.join(".kitsu/kitsu.toml");
+    let cfg = std::fs::read_to_string(&toml).expect("toml").replacen(
+        "timeout = \"1m\"\n",
+        "timeout = \"1m\"\nscope = [\"payments.py\", \"test_retries.py\", \"fake_upstream.py\"]\n",
+        1,
+    );
+    std::fs::write(&toml, cfg).expect("write");
+    git(
+        &env.repo,
+        &["commit", "-qam", "retries looks at the charge path"],
+    );
+    let good = std::fs::read_to_string(agent("good")).expect("good");
+    let s = env.script(
+        "unguarded",
+        &format!("{good}\n[[steps]]\nwrite = {{ path = \"deploy.sh\", content = \"rm -rf /srv/app\\n\" }}\n"),
+    );
+    assert!(env.run_with(&s, "rung", &[]).status.success());
+
+    let v: serde_json::Value =
+        serde_json::from_str(&env.ok(&["--json", "review", "rung"])).expect("json");
+    assert_eq!(v["unguarded"], serde_json::json!(["deploy.sh"]), "{v}");
+    // Each green check stands on a receipt: the command, the tree, exit 0.
+    let receipts = v["receipts"].as_array().expect("receipts");
+    assert_eq!(receipts.len(), 2, "{v}");
+    for r in receipts {
+        assert_eq!(r["exit_code"], 0, "{r}");
+        assert_eq!(r["binding"], "current", "{r}");
+        assert!(r["command"].as_str().expect("cmd").contains("unittest"));
+    }
+    let human = env.ok(&["review", "rung"]);
+    assert!(human.contains("not checked by anything"), "{human}");
+    assert!(human.contains("receipt: exit 0"), "{human}");
+    let status = env.ok(&["status"]);
+    assert!(
+        status.contains("checks pass; 1 changed path is checked by nothing"),
+        "{status}"
+    );
+    // Still yours to accept, and it says what landed unchecked.
+    let out = env.ok(&["accept", "rung"]);
+    assert!(out.contains("no check looked at deploy.sh"), "{out}");
+}
+
+#[test]
 fn the_agents_claim_does_not_count_the_check_does() {
     let env = Env::new("naive");
     let out = env.run_with(&agent("naive"), "rnaive", &[]);

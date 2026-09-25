@@ -84,7 +84,16 @@
           }
           break;
         case "permission":
-          out.push({ type: "note", key: `n${e.seq}`, text: t("act.allowed", { title: String(b.title ?? ""), by: String(b.by ?? "") }), tone: "dim" });
+          // Let through on the judge's probability: said as a judgment, never as a check.
+          out.push({
+            type: "note",
+            key: `n${e.seq}`,
+            text:
+              b.by === "judge" && typeof b.p_yes === "number"
+                ? t("act.judged", { title: String(b.title ?? ""), p: b.p_yes.toFixed(2) })
+                : t("act.allowed", { title: String(b.title ?? ""), by: String(b.by ?? "") }),
+            tone: "dim",
+          });
           break;
         case "ask.open":
           out.push({ type: "note", key: `n${e.seq}`, text: t("act.asked", { title: String(b.request?.title ?? "") }), tone: "warn" });

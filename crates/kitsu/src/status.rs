@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use crate::check::{CheckStatus, status_at};
+use crate::check::{CheckStatus, Receipt, receipt, status_at};
 use crate::error::Result;
 use crate::git::Git;
 use crate::intent::{CheckDef, Intent, Task, TaskState};
@@ -60,6 +60,12 @@ pub enum Status {
         verdict: Verdict,
         /// Required checks that fail on the snapshot.
         failing: Vec<String>,
+        /// Changed paths no required check looks at (`unchecked_paths`).
+        /// Unknown, whatever the verdict says about the rest.
+        unguarded: Vec<String>,
+        /// What each required check's mark stands on; a check without one
+        /// has not run on anything this attempt could be judged by.
+        receipts: Vec<Receipt>,
     },
     Failed {
         run: String,
@@ -159,6 +165,65 @@ pub fn required_checks(
         .filter(|(name, _)| intent.config.checks.contains_key(name))
         .map(|(name, why)| RequiredCheck { name, why })
         .collect()
+}
+
+/// The paths in `changed` that no check this change requires looks at.
+/// They are unknown: not passing, not failing, and never shown green.
+///
+/// A path is looked at when it is inside the `scope` of a check in
+/// `required_checks` (an empty scope is the whole repository). Not
+/// `guards`: guards say when a check is required, scope says what its
+/// result depends on. Evidence is carried across any edit outside the
+/// scope, so a check whose scope misses a path would stay green whatever
+/// that path says, even if it guards it. And not the scope of a check
+/// nobody requires here: it doesn't run on accept, so it judges nothing.
+pub fn unchecked_paths(intent: &Intent, task: &Task, changed: &[String]) -> Vec<String> {
+    let looking: Vec<&CheckDef> = required_checks(intent, task, Some(changed))
+        .iter()
+        .filter_map(|r| intent.config.checks.get(&r.name))
+        .collect();
+    changed
+        .iter()
+        .filter(|p| !looking.iter().any(|c| c.scope.contains(p)))
+        .cloned()
+        .collect()
+}
+
+/// The checks that make a rule about `scope` more than a note: any change
+/// anywhere in it requires one of them (through `guards`). Empty when some
+/// part of the scope requires nothing, or when it can't be told
+/// (`Scope::covers` says no when unsure). Whether the check tests what the
+/// rule says is still for a reviewer to judge; this only says a check has
+/// to pass before a change there lands.
+pub fn enforcing_checks(intent: &Intent, scope: &Scope) -> Vec<String> {
+    let guarding: Vec<&CheckDef> = intent
+        .config
+        .checks
+        .values()
+        .filter(|c| !c.guards.is_everything())
+        .collect();
+    let parts: Vec<Scope> = if scope.is_everything() {
+        vec![Scope::default()]
+    } else {
+        scope
+            .globs()
+            .iter()
+            .map(|g| Scope::new([g.as_str()]))
+            .collect()
+    };
+    let mut out = BTreeSet::new();
+    for part in &parts {
+        let by: Vec<&str> = guarding
+            .iter()
+            .filter(|c| c.guards.covers(part))
+            .map(|c| c.name.as_str())
+            .collect();
+        if by.is_empty() {
+            return Vec::new();
+        }
+        out.extend(by);
+    }
+    out.into_iter().map(str::to_owned).collect()
 }
 
 pub fn verdict(
@@ -310,21 +375,41 @@ impl Snapshot<'_> {
                 })
                 .map(|(n, _)| n.clone())
                 .collect();
+            let unguarded = match &run.changed {
+                Some(c) if !c.is_empty() => unchecked_paths(self.intent, task, c),
+                _ => Vec::new(),
+            };
+            let unknown = match unguarded.len() {
+                0 => String::new(),
+                1 => "; 1 changed path is checked by nothing".to_string(),
+                n => format!("; {n} changed paths are checked by nothing"),
+            };
             let reason = match v {
-                Verdict::Verified => format!("ready for review, checks pass{more}"),
+                Verdict::Verified => format!("ready for review, checks pass{unknown}{more}"),
                 Verdict::Failing => {
-                    format!("ready for review, failing: {}{more}", failing.join(", "))
+                    format!(
+                        "ready for review, failing: {}{unknown}{more}",
+                        failing.join(", ")
+                    )
                 }
-                Verdict::Unverified => format!("ready for review, not verified yet{more}"),
+                Verdict::Unverified => {
+                    format!("ready for review, not verified yet{unknown}{more}")
+                }
                 Verdict::Empty => format!("{} finished without changing anything{more}", run.agent),
                 Verdict::Unknown => format!("finished, no snapshot recorded{more}"),
             };
+            let mut receipts = Vec::new();
+            for (_, s) in &results {
+                receipts.extend(receipt(self.store, s)?);
+            }
             return Ok((
                 Status::Review {
                     run: run.id.clone(),
                     agent: run.agent.clone(),
                     verdict: v,
                     failing,
+                    unguarded,
+                    receipts,
                 },
                 Attention::NeedsYou,
                 reason,
@@ -464,6 +549,50 @@ mod tests {
             names(required_checks(&i, t, Some(&changed))),
             ["docs", "idem", "unit"]
         );
+    }
+
+    #[test]
+    fn a_path_no_required_check_looks_at_is_unchecked() {
+        let cfg = "[checks.unit]\nrun = \"true\"\nscope = [\"src/**\"]\n[checks.idem]\nrun = \"true\"\nscope = [\"src/client/**\"]\nguards = [\"src/client/**\", \"deploy.sh\"]\n[checks.docs]\nrun = \"true\"\nscope = [\"docs/**\"]\n";
+        let i = intent(&[
+            (".kitsu/kitsu.toml", cfg),
+            (
+                ".kitsu/tasks/t.md",
+                "+++\nscope = [\"src/client/**\"]\nchecks = [\"unit\"]\n+++\n",
+            ),
+        ]);
+        let t = &i.tasks["t"];
+        let changed: Vec<String> = ["src/client/a.rs", "deploy.sh", "docs/x.md", "README.md"]
+            .map(String::from)
+            .to_vec();
+        // `deploy.sh`: idem guards it, but its result doesn't depend on it.
+        // `docs/x.md`: docs looks at it, but nothing requires docs here.
+        assert_eq!(
+            unchecked_paths(&i, t, &changed),
+            ["deploy.sh", "docs/x.md", "README.md"]
+        );
+        // A required check with no scope looks at everything.
+        let i = intent(&[
+            (".kitsu/kitsu.toml", "[checks.all]\nrun = \"true\"\n"),
+            (".kitsu/tasks/t.md", "+++\nchecks = [\"all\"]\n+++\n"),
+        ]);
+        assert!(unchecked_paths(&i, &i.tasks["t"], &changed).is_empty());
+    }
+
+    #[test]
+    fn a_decision_is_enforced_only_where_a_check_guards_all_of_it() {
+        let i = intent(&[(".kitsu/kitsu.toml", CFG)]);
+        let s = |g: &[&str]| Scope::new(g.iter().copied());
+        assert_eq!(enforcing_checks(&i, &s(&["src/client/retry.rs"])), ["idem"]);
+        assert_eq!(
+            enforcing_checks(&i, &s(&["src/client/**", "docs/a.md"])),
+            ["docs", "idem"]
+        );
+        // Part of it is guarded by nothing: a note.
+        assert!(enforcing_checks(&i, &s(&["src/client/**", "src/server/**"])).is_empty());
+        // `lint` guards nothing, so it enforces nothing, and nothing
+        // guards the whole repository.
+        assert!(enforcing_checks(&i, &Scope::default()).is_empty());
     }
 
     #[test]

@@ -2,8 +2,8 @@
   import { app } from "../lib/app.svelte";
   import { errorText } from "../lib/api";
   import { i18n, t } from "../lib/i18n/index.svelte";
-  import { checkWord } from "../lib/status";
-  import { render } from "../lib/md";
+  import { checkWord, receiptLine } from "../lib/status";
+  import { inline, render } from "../lib/md";
   import type { Rules } from "../lib/types";
   // This project's commands, fixed for as long as the component lives.
   const api = app.api;
@@ -12,6 +12,8 @@
   let error = $state<string | null>(null);
   let running = $state(false);
   let answers = $state<Record<string, string>>({});
+  // Live decisions no check enforces: notes, whatever their prose says.
+  const notes = $derived((rules?.decisions ?? []).filter((d) => d.state !== "superseded" && !d.enforced_by.length));
 
   $effect(() => {
     void app.tick;
@@ -65,7 +67,7 @@
   {#if rules}
     <div class="section-title">{t("rules.mustHold")}</div>
     {#each rules.checks.filter((c) => c.guards.length) as c (c.name)}
-      {@const w = checkWord(c.status)}
+      {@const w = checkWord(c.status, c.receipt)}
       <div class="item">
         <div class="item-head">
           <span class="item-title">{c.why ?? c.name}</span>
@@ -78,9 +80,23 @@
     {/each}
 
     <div class="section-title">{t("rules.decisions")}</div>
+    <!-- Prose nobody is held to, said first and by name. -->
+    {#if notes.length}
+      <div class="notes">
+        <div class="notes-title">{t("rules.notes")}</div>
+        <div class="notes-ids">
+          {#each notes as d, i (d.id)}<button class="mono link" onclick={() => document.getElementById(`decision-${d.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" })}>{d.id}</button>{i < notes.length - 1 ? ", " : ""}{/each}
+        </div>
+        <div class="hint">{@html inline(t("rules.notesBody"))}</div>
+      </div>
+    {/if}
     {#each rules.decisions as d (d.id)}
-      <div class="item">
-        <div class="item-head"><span class="item-title">{d.title}</span>{#if d.state !== "accepted"}<span class="pill {d.state === 'proposed' ? 'warn' : 'dim'}">{d.state === "proposed" ? t("rules.proposed") : d.state === "superseded" ? t("rules.superseded") : d.state}</span>{/if}</div>
+      <div class="item" id={`decision-${d.id}`}>
+        <div class="item-head">
+          <span class="item-title">{d.title}</span>
+          {#if d.state === "superseded"}{:else if d.enforced_by.length}<span class="hint">{t("rules.enforcedBy", { checks: i18n.list(d.enforced_by) })}</span>{:else}<span class="pill warn" title={t("rules.noteHint")}>{t("rules.note")}</span>{/if}
+          {#if d.state !== "accepted"}<span class="pill {d.state === 'proposed' ? 'warn' : 'dim'}">{d.state === "proposed" ? t("rules.proposed") : d.state === "superseded" ? t("rules.superseded") : d.state}</span>{/if}
+        </div>
         {#if d.body.trim()}<div class="prose small">{@html render(d.body)}</div>{/if}
         {#if d.rejected.length}
           <ul class="rejected">
@@ -140,12 +156,13 @@
       <button class="btn" disabled={running} onclick={runChecks}>{running ? t("rules.running") : t("rules.runAll")}</button>
     </div>
     {#each rules.checks as c (c.name)}
-      {@const w = checkWord(c.status)}
+      {@const w = checkWord(c.status, c.receipt)}
       <div class="check">
         <span class="mono name">{c.name}</span>
         <span class="mono cmd">{c.run}</span>
         <span class="pill {w.tone}" title={w.hint ?? ""}>{w.word}</span>
       </div>
+      {#if c.receipt}<div class="hint mono receipt">{t("receipt.label")} · {receiptLine(c.receipt)} · {t(`receipt.${c.receipt.binding}`)}</div>{/if}
     {:else}
       <p class="hint">{t("rules.noChecks")}</p>
     {/each}
@@ -213,6 +230,28 @@
     display: flex;
     gap: var(--s2);
     margin: var(--s2) 0;
+  }
+  .notes {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+    margin-bottom: var(--s2);
+    padding: var(--s3) var(--s4);
+    border: 1px dashed var(--warn);
+    border-radius: 10px;
+    font-size: 13px;
+  }
+  .notes-title {
+    font-weight: 600;
+  }
+  .notes-ids .link {
+    color: var(--accent);
+    font-size: 12.5px;
+  }
+  .receipt {
+    padding: 0 0 var(--s3) calc(120px + var(--s4));
+    border-bottom: 1px solid var(--line);
+    margin-top: calc(-1 * var(--s2));
   }
   .checks-title {
     display: flex;

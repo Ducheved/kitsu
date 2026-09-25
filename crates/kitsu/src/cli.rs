@@ -717,6 +717,16 @@ fn status(ws: &Workspace, json: bool) -> Result<()> {
             println!("{}", paint(heading, BOLD));
         }
         println!("  {:<28} {}  {}", v.id, v.title, paint(&v.reason, DIM));
+        // A "checks pass" is only as good as what it stands on.
+        if let crate::status::Status::Review { receipts, .. } = &v.status {
+            let now = now_ms();
+            for r in receipts.iter().filter(|r| r.passing()) {
+                println!(
+                    "      {}",
+                    paint(&format!("{} {}", r.check, r.line(now)), DIM)
+                );
+            }
+        }
     }
     if views.is_empty() {
         println!("no tasks yet. `kitsu new task \"...\"`");
@@ -870,10 +880,15 @@ fn show_checks(ws: &Workspace, intent: &Intent, id: &str, kind: Kind) -> Result<
     println!("\n{}", paint("checks on your working tree", DIM));
     for n in names {
         if let Some(def) = intent.config.checks.get(&n) {
-            println!(
-                "  {n:<16} {}",
-                status_word(&status_at(&git, &store, def, &tree)?)
-            );
+            let s = status_at(&git, &store, def, &tree)?;
+            println!("  {n:<16} {}", status_word(&s));
+            if let Some(r) = crate::check::receipt(&store, &s)? {
+                println!(
+                    "  {:<16} {}",
+                    "",
+                    paint(&format!("receipt: {}", r.line(now_ms())), DIM)
+                );
+            }
         }
     }
     Ok(())
@@ -1338,8 +1353,37 @@ fn review(ws: &Workspace, run: &str, diff: bool, json: bool) -> Result<()> {
     if r.files.is_empty() {
         println!("  no changes");
     }
+    let now = now_ms();
     for (name, s) in &r.checks {
         println!("  check {name:<14} {}", status_word(s));
+        if let Some(rc) = r.receipts.iter().find(|x| &x.check == name) {
+            println!(
+                "        {}",
+                paint(&format!("receipt: {}", rc.line(now)), DIM)
+            );
+        }
+    }
+    if !r.unguarded.is_empty() {
+        println!(
+            "  {} not checked by anything, only your reading decides:",
+            paint("unknown:", YELLOW)
+        );
+        for p in &r.unguarded {
+            println!("    {p}");
+        }
+    }
+    for j in &r.judgments {
+        println!(
+            "  {} {} {} ({})",
+            paint("judgment:", DIM),
+            j.purpose,
+            j.answers,
+            j.model.as_deref().unwrap_or(&j.outcome)
+        );
+    }
+    if let Some(c) = &r.claim {
+        let first: String = c.lines().next().unwrap_or("").chars().take(120).collect();
+        println!("  {} {first}", paint("the agent says (not checked):", DIM));
     }
     if let Some(t) = &r.approval_token {
         let what = if r.protected.iter().all(|p| intent::is_memory_note(p)) {
@@ -1387,6 +1431,7 @@ fn accept(
             commit,
             closed_task,
             notes,
+            unguarded,
         } => {
             if !json {
                 println!(
@@ -1395,6 +1440,13 @@ fn accept(
                     &commit[..10],
                     if closed_task { ", task closed" } else { "" }
                 );
+                if !unguarded.is_empty() {
+                    println!(
+                        "  {} no check looked at {}; they landed on your reading alone",
+                        paint("unknown:", YELLOW),
+                        unguarded.join(", ")
+                    );
+                }
                 for n in notes {
                     println!("  {n}");
                 }

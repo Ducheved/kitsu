@@ -20,7 +20,7 @@ use crate::intent::{DecisionState, Intent, Memory, MemoryKind, MemoryState, Ques
 use crate::memory::{self, Freshness, Personal};
 use crate::run::RunState;
 use crate::stats::estimate_tokens;
-use crate::status::required_checks;
+use crate::status::{enforcing_checks, required_checks};
 use crate::store::{RunRow, Store};
 
 /// In estimated tokens (see `stats::estimate_tokens`), the unit the rest of
@@ -36,6 +36,11 @@ pub struct Included {
     pub path: String,
     pub content_id: String,
     pub why: String,
+    /// Decisions only: the checks that must pass before a change anywhere in
+    /// its scope lands (`status::enforcing_checks`). Empty: it is a note, no
+    /// check enforces it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enforced_by: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +107,7 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
         path: task.source.path.clone(),
         content_id: task.source.content_id.clone(),
         why: "the task".into(),
+        enforced_by: None,
     });
     if !task.body.trim().is_empty() {
         let _ = writeln!(out);
@@ -198,7 +204,14 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
         } else {
             ""
         };
-        let _ = writeln!(body, "- **{}**{settled} (`{}`)", d.title, d.id);
+        let enforced_by = enforcing_checks(intent, &d.scope);
+        // Prose alone protects nothing: say which rules are only notes.
+        let note = if enforced_by.is_empty() {
+            " (a note: no check enforces it)"
+        } else {
+            ""
+        };
+        let _ = writeln!(body, "- **{}**{settled}{note} (`{}`)", d.title, d.id);
         for line in excerpt(&d.body, 10).lines() {
             let _ = writeln!(body, "  {line}");
         }
@@ -220,6 +233,7 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
                 path: d.source.path.clone(),
                 content_id: d.source.content_id.clone(),
                 why,
+                enforced_by: Some(enforced_by),
             }],
             kind: "decision",
             id: d.id.clone(),
@@ -255,6 +269,7 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
                 path: q.source.path.clone(),
                 content_id: q.source.content_id.clone(),
                 why: "blocks this task".into(),
+                enforced_by: None,
             }],
             kind: "question",
             id: q.id.clone(),
@@ -357,6 +372,7 @@ pub fn compile(cx: &Context<'_>, task: &Task) -> Brief {
                 path: m.source.path.clone(),
                 content_id: m.source.content_id.clone(),
                 why,
+                enforced_by: None,
             }],
             kind: "memory",
             id: m.id.clone(),
@@ -605,6 +621,10 @@ mod tests {
                 "+++\ntitle = \"At most 3 attempts\"\nrejected = [\"infinite retry: amplifies outages\"]\nscope = [\"src/client/**\"]\n+++\n",
             ),
             (
+                ".kitsu/decisions/logs.md",
+                "+++\ntitle = \"Log every retry\"\nscope = [\"src/**\"]\n+++\n",
+            ),
+            (
                 ".kitsu/questions/dedupe.md",
                 "+++\ntitle = \"Does upstream dedupe keys?\"\nblocks = [\"retry\"]\nstate = \"answered\"\nanswer = \"Yes, for 24h.\"\n+++\n",
             ),
@@ -651,6 +671,16 @@ mod tests {
             .find(|x| x.id == "bounded")
             .expect("decision in scope included");
         assert!(d.why.contains("overlaps"));
+        // `idem` guards all of src/client/**: that decision has a check.
+        // Nothing guards the rest of src/**: that one is a note, and says so.
+        assert_eq!(d.enforced_by.as_deref(), Some(&["idem".to_string()][..]));
+        let logs = b.included.iter().find(|x| x.id == "logs").expect("logs");
+        assert_eq!(logs.enforced_by.as_deref(), Some(&[][..]));
+        assert!(
+            md.contains("**At most 3 attempts** (`bounded`)")
+                && md.contains("**Log every retry** (a note: no check enforces it) (`logs`)"),
+            "{md}"
+        );
         // What a check protects rides in the part that survives compaction.
         assert!(
             b.anchor.contains("comes from the operation"),

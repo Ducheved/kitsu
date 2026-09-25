@@ -63,6 +63,46 @@ impl Scope {
             })
         })
     }
+
+    /// Is every path inside `other` certainly inside `self`?
+    ///
+    /// The opposite lean from `may_overlap`: when it can't tell, it says
+    /// no. It answers "does a check cover this rule", and an unsure yes
+    /// would turn a note into something that looks enforced.
+    pub fn covers(&self, other: &Scope) -> bool {
+        if self.is_everything() {
+            return true;
+        }
+        if other.is_everything() {
+            return self.globs.iter().any(|h| h == "**");
+        }
+        other
+            .globs
+            .iter()
+            .all(|g| self.globs.iter().any(|h| glob_covers(h, g)))
+    }
+}
+
+/// Every path `inner` matches, `outer` matches too. Only two shapes are
+/// understood: the same glob, and `dir/**` over anything whose leading
+/// segments spell `dir` literally. Anything else is "not known to".
+fn glob_covers(outer: &str, inner: &str) -> bool {
+    if outer == inner || outer == "**" {
+        return true;
+    }
+    let Some(dir) = outer.strip_suffix("/**") else {
+        return false;
+    };
+    if dir.contains(['*', '?']) {
+        return false;
+    }
+    let want: Vec<&str> = dir.split('/').collect();
+    let segs: Vec<&str> = inner.split('/').collect();
+    segs.len() > want.len()
+        && want
+            .iter()
+            .zip(&segs)
+            .all(|(w, s)| w == s && !s.contains(['*', '?']))
 }
 
 fn normalize(glob: &str) -> String {
@@ -175,5 +215,21 @@ mod tests {
         assert!(!client.may_overlap(&Scope::new(["docs/**"])));
         // Known false positive, documented above.
         assert!(Scope::new(["src/*.rs"]).may_overlap(&Scope::new(["src/*.md"])));
+    }
+
+    #[test]
+    fn covers_says_no_when_unsure() {
+        let crates = Scope::new(["crates/**", "Cargo.toml"]);
+        assert!(crates.covers(&Scope::new(["crates/kitsu/src/check.rs"])));
+        assert!(crates.covers(&Scope::new(["crates/**", "Cargo.toml"])));
+        assert!(crates.covers(&Scope::new(["crates/*/src/**"])));
+        assert!(!crates.covers(&Scope::new(["crates/a.rs", "app/src/**"])));
+        assert!(!crates.covers(&Scope::new(["**/*.rs"])));
+        // A rule for the whole repository is covered only by a check that is.
+        assert!(!crates.covers(&Scope::default()));
+        assert!(Scope::default().covers(&Scope::default()));
+        // Globs other than `dir/**` cover only themselves.
+        assert!(!Scope::new(["**/*.rs"]).covers(&Scope::new(["src/a.rs"])));
+        assert!(!Scope::new(["src/*/**"]).covers(&Scope::new(["src/a/b.rs"])));
     }
 }
