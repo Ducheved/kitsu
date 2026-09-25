@@ -91,6 +91,11 @@ enum Cmd {
         /// Continue from an earlier run's result instead of HEAD.
         #[arg(long)]
         from: Option<String>,
+        /// With --from and Kitsu's own agent: pick up that run's
+        /// conversation where it stopped (after a crash, a budget, a stop).
+        /// Tool calls it left unfinished are settled, never repeated.
+        #[arg(long, requires = "from")]
+        resume: bool,
         /// A note for the agent, added to its brief.
         #[arg(long)]
         note: Option<String>,
@@ -283,6 +288,7 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
             task,
             agent,
             from,
+            resume,
             note,
             policy,
             no_verify,
@@ -298,6 +304,7 @@ fn dispatch(cli: Cli) -> Result<std::process::ExitCode> {
                     task,
                     agent: agents::resolve(&agent)?,
                     from,
+                    resume,
                     note,
                     policy,
                     verify: !no_verify,

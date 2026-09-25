@@ -565,3 +565,158 @@ fn two_overflows_in_a_row_stop_the_run_instead_of_looping() {
     );
     assert_eq!(env.requests().len(), 1);
 }
+
+/// Crash run `a` at `fault`, recover, resume it as `b`. Returns b's worktree.
+fn crash_and_resume(env: &Env, fault: &str, extra: &[&str]) -> PathBuf {
+    let mut args = vec![
+        "run",
+        "bounded-retries",
+        "--agent",
+        "kitsu",
+        "--id",
+        "ra",
+        "-q",
+    ];
+    args.extend_from_slice(extra);
+    let o = env
+        .cmd(&args)
+        .env("KITSU_FAULT", fault)
+        .output()
+        .expect("run a");
+    assert!(!o.status.success(), "the fault should have killed the run");
+    env.ok(&["recover"]);
+    assert_eq!(
+        env.store().run("ra").expect("ra").state,
+        RunState::Interrupted
+    );
+    let mut args = vec![
+        "run",
+        "bounded-retries",
+        "--agent",
+        "kitsu",
+        "--id",
+        "rb",
+        "--from",
+        "ra",
+        "--resume",
+        "-q",
+    ];
+    args.extend_from_slice(extra);
+    let o = env.cmd(&args).output().expect("run b");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    env.repo.join(".git/kitsu/worktrees/rb")
+}
+
+fn begins(env: &Env, call: &str) -> usize {
+    ["ra", "rb"]
+        .iter()
+        .flat_map(|r| env.events(r))
+        .filter(|(k, b)| k == "tool.begin" && b["call"] == call)
+        .count()
+}
+
+#[test]
+fn an_edit_that_landed_before_the_crash_is_settled_as_applied_not_repeated() {
+    let old = "\"\"\"Charges a card through an upstream payment API.\"\"\"";
+    let script = json!([
+        { "tool": "edit_file", "args": { "path": "payments.py", "old": old, "new": format!("{old}\n# marker") } },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "stopping" }, "expect": "the change was applied. It was not repeated." },
+    ]);
+    let env = Env::new("crash-edit", &script, "");
+    let wt = crash_and_resume(&env, "after_effect:edit_file", &[]);
+    let text = std::fs::read_to_string(wt.join("payments.py")).expect("payments.py");
+    assert_eq!(text.matches("# marker").count(), 1, "applied exactly once");
+    assert_eq!(begins(&env, "ra/c1"), 1, "the effect never started twice");
+    let end = env
+        .events("rb")
+        .into_iter()
+        .find(|(k, b)| k == "tool.end" && b["call"] == "ra/c1")
+        .expect("settled");
+    assert_eq!(
+        (end.1["outcome"].as_str(), end.1["reconciled"].as_bool()),
+        (Some("applied"), Some(true))
+    );
+    assert_eq!(
+        stop_reason(&env, "rb"),
+        (RunState::Finished, Some("blocked".into()))
+    );
+}
+
+#[test]
+fn a_write_that_never_happened_is_settled_as_not_applied() {
+    let script = json!([
+        { "tool": "write_file", "args": { "path": "payments.py", "content": "broken\n" } },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "stopping" }, "expect": "the change was not applied" },
+    ]);
+    let env = Env::new("crash-write", &script, "");
+    let wt = crash_and_resume(&env, "before_effect:write_file", &[]);
+    let text = std::fs::read_to_string(wt.join("payments.py")).expect("payments.py");
+    assert!(
+        text.starts_with("\"\"\"Charges a card"),
+        "unchanged: {text}"
+    );
+    let end = env
+        .events("rb")
+        .into_iter()
+        .find(|(k, b)| k == "tool.end" && b["call"] == "ra/c1")
+        .expect("settled");
+    assert_eq!(end.1["outcome"], "not_applied");
+}
+
+#[test]
+fn a_command_cut_off_by_a_crash_is_unknown_and_never_run_again() {
+    let script = json!([
+        { "tool": "shell", "args": { "command": "echo x >> log.txt" } },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "stopping" }, "expect": "it was not run again. Files changed since it started: log.txt." },
+    ]);
+    let env = Env::new("crash-shell", &script, "");
+    let wt = crash_and_resume(&env, "after_effect:shell", &["--policy", "auto"]);
+    let log = std::fs::read_to_string(wt.join("log.txt")).expect("log.txt");
+    assert_eq!(log, "x\n", "ran once");
+    let end = env
+        .events("rb")
+        .into_iter()
+        .find(|(k, b)| k == "tool.end" && b["call"] == "ra/c1")
+        .expect("settled");
+    assert_eq!(end.1["outcome"], "unknown");
+}
+
+#[test]
+fn resume_is_only_for_kitsus_own_loop() {
+    let env = Env::new("resume-acp", &json!([]), "");
+    std::fs::write(env.root.join("s.toml"), "[[steps]]\nsay = \"hi\"\n").expect("script");
+    let o = env
+        .cmd(&[
+            "run",
+            "bounded-retries",
+            "--agent",
+            "test",
+            "--id",
+            "rt",
+            "-q",
+            "--no-verify",
+        ])
+        .env("KITSU_TEST_SCRIPT", env.root.join("s.toml"))
+        .output()
+        .expect("run");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let o = env
+        .cmd(&[
+            "run",
+            "bounded-retries",
+            "--agent",
+            "test",
+            "--from",
+            "rt",
+            "--resume",
+            "-q",
+        ])
+        .output()
+        .expect("resume");
+    assert!(!o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("--resume continues Kitsu's own agent loop"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}

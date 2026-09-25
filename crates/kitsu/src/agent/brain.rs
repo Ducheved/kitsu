@@ -63,8 +63,11 @@ async fn drive(
         .call(protocol::JOURNAL_READ, json!({ "after_seq": 0 }))
         .await?;
     let entries: Vec<Value> = entries["entries"].as_array().cloned().unwrap_or_default();
+    // Budgets are per run: a resumed run gets its own, counted from here.
+    let this_run = |e: &&Value| e["run"].as_str().is_none_or(|r| r == run);
     let mut tokens: u64 = entries
         .iter()
+        .filter(this_run)
         .filter(|e| e["kind"] == "model.response")
         .map(|e| {
             e["body"]["usage"]["prompt"].as_u64().unwrap_or(0)
@@ -72,6 +75,11 @@ async fn drive(
         })
         .sum();
     let mut conv = context::fold(&entries);
+    let earlier_turns = entries
+        .iter()
+        .filter(|e| !this_run(e))
+        .filter(|e| e["kind"] == "model.response")
+        .count() as u64;
     let mut last_prompt: Option<u64> = None;
     // Set after the provider said the last request didn't fit: compact
     // harder and retry once; a second overflow in a row ends the run.
@@ -90,7 +98,7 @@ async fn drive(
                 return Ok(End::Stopped(stop));
             }
         }
-        if conv.turns() >= max_turns {
+        if conv.turns().saturating_sub(earlier_turns) >= max_turns {
             return Ok(stop(link, "budget_turns").await);
         }
         if tokens >= max_tokens {
@@ -98,17 +106,18 @@ async fn drive(
         }
 
         let turn = conv.turns() + 1;
+        let run_turn = turn - earlier_turns;
         let mut warnings = Vec::new();
-        if turn * 5 >= max_turns * 4 {
+        if run_turn * 5 >= max_turns * 4 {
             warnings.push(format!(
-                "turn {turn} of {max_turns}; wrap up or say what blocks you"
+                "turn {run_turn} of {max_turns}; wrap up or say what blocks you"
             ));
         }
         if tokens.saturating_mul(5) >= max_tokens.saturating_mul(4) {
             warnings.push(format!("{tokens} of {max_tokens} tokens used"));
         }
         let ledger = link
-            .call(protocol::STATE, json!({ "turn": turn, "tokens": tokens, "context": last_prompt, "warnings": warnings }))
+            .call(protocol::STATE, json!({ "turn": run_turn, "tokens": tokens, "context": last_prompt, "warnings": warnings }))
             .await?;
         let ledger = ledger["text"].as_str().unwrap_or("").to_string();
         let mut msgs = context::render(&prefix, &conv, &ledger);

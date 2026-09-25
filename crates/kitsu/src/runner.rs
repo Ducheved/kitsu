@@ -105,6 +105,8 @@ pub struct Options {
     pub task: String,
     pub agent: AgentSpec,
     pub from: Option<String>,
+    /// Continue `from`'s conversation (Kitsu's own agent only).
+    pub resume: bool,
     pub note: Option<String>,
     pub policy: Policy,
     pub verify: bool,
@@ -133,6 +135,12 @@ pub fn prepare(ws: &Workspace, store: &Store, me: &Instance, opts: &Options) -> 
         .ok_or_else(|| Error::NotFound(format!("task {}", opts.task)))?;
     if task.state != TaskState::Open {
         return Err(Error::Invalid(format!("task {} is not open", task.id)));
+    }
+    if opts.resume && opts.agent.native.is_none() {
+        return Err(Error::Invalid(format!(
+            "--resume continues Kitsu's own agent loop; `{}` is an external agent, which keeps its own conversation (use --from without --resume)",
+            opts.agent.name
+        )));
     }
     let git = ws.git();
     let base = match &opts.from {
@@ -174,6 +182,11 @@ pub fn prepare(ws: &Workspace, store: &Store, me: &Instance, opts: &Options) -> 
         {
             let _guard = ws.lock_worktrees()?;
             git.worktree_add(&worktree, &branch, &base)?;
+        }
+        if opts.resume
+            && let Some(from) = &opts.from
+        {
+            store.append(Some(&id), "run.resume", &json!({ "from": from }))?;
         }
         let run = store.run(&id)?;
         let b = brief::compile(

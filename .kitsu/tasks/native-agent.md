@@ -14,9 +14,13 @@ provider's overflow error only the newest step is kept verbatim and the
 request is retried once, or not at all if nothing could shrink. The
 harness and the brief are byte-identical in every request.
 
+Resume is in: `kitsu run <task> --agent kitsu --from rX --resume`
+continues rX's conversation; a call that began and never ended is
+settled from what was recorded before it ran (a write: applied or not by
+the file's hash; a command: unknown, never re-run), read-only calls just
+run again. Budgets count per run.
+
 Still to do, each with a scripted-stub test that fails without it:
-- Resume after a crash: `--from rX --resume`; `tool.begin` without an end
-  is settled from `pre` (applied / not applied / unknown), never repeated.
 - Doom-loop signal: the same call three times in eight with no change to
   the tree warns, a second signal stops.
 - Cancel during a long shell command; confinement e2e (symlink escape);

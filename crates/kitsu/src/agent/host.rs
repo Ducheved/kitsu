@@ -43,6 +43,11 @@ pub struct Host<'a> {
     pub brief: String,
     /// Results of calls already finished, by call id.
     ended: BTreeMap<String, Value>,
+    /// `tool.begin` bodies with no end: a process died mid-call.
+    begun: BTreeMap<String, Value>,
+    /// Earlier runs this one resumes, oldest first; their journals come
+    /// before this run's.
+    chain: Vec<String>,
     rejections: u32,
     /// Set when the run should end, with the stop reason.
     pub stop: Option<String>,
@@ -79,17 +84,29 @@ impl<'a> Host<'a> {
             harness,
             brief,
             ended: BTreeMap::new(),
+            begun: BTreeMap::new(),
+            chain: resume_chain(store, run)?,
             rejections: 0,
             stop: None,
             plan: Vec::new(),
             usage: Usage::default(),
             mcp: crate::mcp::Server::new(ws.clone(), run.to_string()),
         };
-        for e in h.journal(0)? {
-            if e["kind"] == "tool.end"
-                && let Some(c) = e["body"]["call"].as_str()
-            {
-                h.ended.insert(c.to_string(), e["body"].clone());
+        for run in h.chain.iter().chain(std::iter::once(&h.run)) {
+            for e in all_events(store, run)? {
+                let Some(c) = e.body["call"].as_str() else {
+                    continue;
+                };
+                match e.kind.as_str() {
+                    "tool.begin" => {
+                        h.begun.insert(c.to_string(), e.body.clone());
+                    }
+                    "tool.end" => {
+                        h.begun.remove(c);
+                        h.ended.insert(c.to_string(), e.body.clone());
+                    }
+                    _ => {}
+                }
             }
         }
         Ok(h)
@@ -147,23 +164,22 @@ impl<'a> Host<'a> {
     }
 
     /// The events a brain folds into its conversation.
+    /// The events a brain folds into its conversation: the resumed runs'
+    /// first, then this run's.
     fn journal(&self, after: i64) -> Result<Vec<Value>> {
         let mut out = Vec::new();
-        let mut seq = after;
-        loop {
-            let page = self.store.run_events(&self.run, seq, 1000)?;
-            let Some(last) = page.last() else { break };
-            seq = last.seq;
-            for e in &page {
+        let runs = self.chain.iter().chain(std::iter::once(&self.run));
+        for run in runs {
+            for e in all_events(self.store, run)? {
+                if e.seq <= after && run == &self.run {
+                    continue;
+                }
                 if matches!(
                     e.kind.as_str(),
                     "model.response" | "tool.end" | "ctx.compacted" | "loop.signal"
                 ) {
-                    out.push(json!({ "seq": e.seq, "kind": e.kind, "body": e.body }));
+                    out.push(json!({ "seq": e.seq, "run": run, "kind": e.kind, "body": e.body }));
                 }
-            }
-            if page.len() < 1000 {
-                break;
             }
         }
         Ok(out)
@@ -303,6 +319,20 @@ impl<'a> Host<'a> {
                 }
             }
         }
+        if let Some(begin) = self.begun.get(&call).cloned()
+            && let Some((outcome, text)) = self.reconcile(&name, &begin)
+        {
+            let body = json!({ "call": call, "tool": name, "outcome": outcome, "is_error": false, "text": text, "implicit": implicit, "turn": turn, "reconciled": true });
+            self.store
+                .append(Some(&self.run), "tool.end", &body)
+                .map_err(|e| e.to_string())?;
+            self.begun.remove(&call);
+            self.ended.insert(call.clone(), body);
+            let _ = self
+                .store
+                .append(Some(&self.run), "agent.tool", &ui("completed"));
+            return Ok(result(&text, false, outcome));
+        }
         let pre = self.pre(&name, &raw);
         self.store
             .append(
@@ -317,7 +347,10 @@ impl<'a> Host<'a> {
         if self.echo {
             eprintln!("[tool] {title}");
         }
-        let (text, is_error, outcome) = match self.execute(&name, &raw, wake).await {
+        fault("before_effect", &name);
+        let executed = self.execute(&name, &raw, wake).await;
+        fault("after_effect", &name);
+        let (text, is_error, outcome) = match executed {
             Ok(t) => (t, false, "done"),
             Err(Failure::Invalid(e)) => (e, true, "invalid"),
             Err(Failure::Failed(e)) => (e, true, "done"),
@@ -331,6 +364,69 @@ impl<'a> Host<'a> {
             &ui(if is_error { "failed" } else { "completed" }),
         );
         Ok(result(&text, is_error, outcome))
+    }
+
+    /// A call that began in a process that died, and never ended. Its
+    /// effect is settled from what was recorded before it ran; an effect
+    /// that can't be known is reported as unknown and never repeated.
+    /// `None`: the call only reads, so it simply runs again.
+    fn reconcile(&self, name: &str, begin: &Value) -> Option<(&'static str, String)> {
+        let died = "The Kitsu process running this call died before recording its result.";
+        match tools::effect(name) {
+            Effect::None => None,
+            Effect::Worktree => {
+                let pre = &begin["pre"];
+                let path = pre["path"].as_str().unwrap_or("");
+                let now = tools::confine(&self.worktree, path)
+                    .ok()
+                    .and_then(|p| std::fs::read(p).ok())
+                    .map(|b| content_id(&b));
+                let (outcome, what) = if now.is_some()
+                    && now.as_deref() == pre["sha_after"].as_str()
+                {
+                    (
+                        "applied",
+                        format!("{path} has the new content: the change was applied."),
+                    )
+                } else if now.as_deref() == pre["sha_before"].as_str() {
+                    (
+                        "not_applied",
+                        format!(
+                            "{path} is unchanged: the change was not applied. Call it again if you still want it."
+                        ),
+                    )
+                } else {
+                    (
+                        "unknown",
+                        format!(
+                            "{path} matches neither the content before nor the intended content after. Read it before changing it."
+                        ),
+                    )
+                };
+                Some((outcome, format!("{died} {what} It was not repeated.\n")))
+            }
+            Effect::Process => {
+                let git = Git::new(&self.worktree);
+                let changed = match (
+                    begin["pre"]["tree_before"].as_str(),
+                    git.worktree_tree(&self.ws.scratch()),
+                ) {
+                    (Some(before), Ok(now)) => git.changed_paths(before, &now).unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                let files = if changed.is_empty() {
+                    "No files changed since it started.".to_string()
+                } else {
+                    format!("Files changed since it started: {}.", changed.join(", "))
+                };
+                Some((
+                    "unknown",
+                    format!(
+                        "{died} Whether it finished, and what it printed, is unknown; it was not run again. {files}\n"
+                    ),
+                ))
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1052,5 +1148,52 @@ async fn capture(mut r: impl tokio::io::AsyncRead + Unpin) -> Captured {
     Captured {
         text: text.trim_end().to_string(),
         total,
+    }
+}
+
+/// Earlier runs that `run` resumes, oldest first. A run resumes its
+/// `from_run` when it recorded `run.resume`; the chain follows that back.
+fn resume_chain(store: &Store, run: &str) -> Result<Vec<String>> {
+    let mut chain = Vec::new();
+    let mut cur = run.to_string();
+    loop {
+        let resumes = all_events(store, &cur)?
+            .iter()
+            .any(|e| e.kind == "run.resume");
+        let from = store.run(&cur)?.from_run;
+        match from {
+            Some(prev) if resumes && !chain.contains(&prev) && prev != run => {
+                chain.push(prev.clone());
+                cur = prev;
+            }
+            _ => break,
+        }
+    }
+    chain.reverse();
+    Ok(chain)
+}
+
+fn all_events(store: &Store, run: &str) -> Result<Vec<crate::store::EventRow>> {
+    let mut out = Vec::new();
+    let mut seq = 0;
+    loop {
+        let page = store.run_events(run, seq, 1000)?;
+        let Some(last) = page.last() else { break };
+        seq = last.seq;
+        let full = page.len() == 1000;
+        out.extend(page);
+        if !full {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Test-only crash points: `KITSU_FAULT=before_effect:<tool>` or
+/// `after_effect:<tool>` aborts the process there, the way a power cut or
+/// a kill -9 would, so resume can be tested against a real crash.
+fn fault(point: &str, tool: &str) {
+    if std::env::var("KITSU_FAULT").is_ok_and(|f| f == format!("{point}:{tool}")) {
+        std::process::abort();
     }
 }
