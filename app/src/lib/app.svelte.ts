@@ -52,7 +52,9 @@ class App {
   overlay = $state<Overlay>(null);
   selected = $state<string | null>(null);
   tick = $state(0);
-  toast = $state<{ text: string; tone: "ok" | "bad" | "info" } | null>(null);
+  toast = $state<{ text: string; tone: "ok" | "bad" | "info"; cheer: boolean } | null>(null);
+  /** Runs accepted in this window; the tour waits on it. */
+  accepted = $state(0);
   prefs = $state<Prefs>(loadPrefs());
   /** Which layout is on screen. With the adaptive layout it follows what you open. */
   mode = $state<Mode>("work");
@@ -162,8 +164,9 @@ class App {
     this.go({ kind: "task", id });
   }
 
-  notify(text: string, tone: "ok" | "bad" | "info" = "info") {
-    this.toast = { text, tone };
+  /** `cheer` puts the happy fox on the toast: for accepts, not routine news. */
+  notify(text: string, tone: "ok" | "bad" | "info" = "info", cheer = false) {
+    this.toast = { text, tone, cheer };
     clearTimeout(this.toastTimer);
     this.toastTimer = setTimeout(() => (this.toast = null), tone === "bad" ? 7000 : 3500);
   }

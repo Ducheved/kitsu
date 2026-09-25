@@ -64,6 +64,7 @@
     align-items: flex-start;
     padding-top: 14vh;
     background: var(--overlay);
+    animation: fade-in var(--fast) var(--ease);
   }
   .sheet {
     display: flex;
@@ -74,6 +75,7 @@
     box-shadow: var(--shadow);
     border: 1px solid var(--line);
     overflow: hidden;
+    animation: pop-in var(--quick) var(--ease);
   }
   .title {
     padding: 20px 22px 8px;

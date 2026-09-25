@@ -5,6 +5,7 @@
   import { t } from "../lib/i18n/index.svelte";
   import { statusText } from "../lib/status";
   import type { Command } from "../lib/types";
+  import Fox from "./Fox.svelte";
 
   let { commands, files = false }: { commands: Command[]; files?: boolean } = $props();
 
@@ -84,7 +85,7 @@
 </script>
 
 <div class="scrim" role="presentation" onclick={() => (app.overlay = null)}>
-  <div class="palette" role="dialog" aria-label={t("group.commands")} tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+  <div class="palette" data-tour="palette" role="dialog" aria-label={t("group.commands")} tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
     <input bind:this={input} class="q" placeholder={files ? t("palette.files") : t("palette.placeholder")} bind:value={query} onkeydown={key} />
     <div class="results scroll" role="listbox">
       {#each items as c, i (c.id)}
@@ -94,7 +95,7 @@
           {#if c.hint}<span class="hint">{c.hint}</span>{/if}
         </button>
       {:else}
-        <div class="none hint">{t("palette.none")}</div>
+        <div class="none hint"><Fox state="idle" size={28} />{t("palette.none")}</div>
       {/each}
     </div>
   </div>
@@ -110,6 +111,7 @@
     align-items: flex-start;
     padding-top: 12vh;
     background: var(--overlay);
+    animation: fade-in var(--fast) var(--ease);
   }
   .palette {
     width: min(620px, 92vw);
@@ -118,10 +120,11 @@
     box-shadow: var(--shadow);
     border: 1px solid var(--line);
     overflow: hidden;
+    animation: pop-in var(--quick) var(--ease);
   }
   .q {
     width: 100%;
-    padding: 16px 18px;
+    padding: var(--s4) var(--s5);
     border: none;
     border-bottom: 1px solid var(--line);
     background: transparent;
@@ -130,10 +133,10 @@
   }
   .results {
     max-height: 50vh;
-    padding: 6px;
+    padding: var(--s2);
   }
   .group {
-    padding: 8px 12px 4px;
+    padding: var(--s3) var(--s3) var(--s1);
     font-size: 11.5px;
     font-weight: 600;
     text-transform: uppercase;
@@ -143,14 +146,18 @@
   .item {
     display: flex;
     align-items: baseline;
-    gap: 12px;
+    gap: var(--s3);
     width: 100%;
-    padding: 8px 12px;
+    padding: var(--s2) var(--s3);
     border-radius: 8px;
     text-align: left;
+    transition: background-color var(--fast) var(--ease);
   }
   .item.on {
     background: var(--active);
+  }
+  .item:active {
+    background: var(--hover);
   }
   .title {
     flex: none;
@@ -165,6 +172,9 @@
     white-space: nowrap;
   }
   .none {
-    padding: 16px;
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    padding: var(--s4);
   }
 </style>

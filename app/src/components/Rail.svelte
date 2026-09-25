@@ -5,6 +5,7 @@
   import { t } from "../lib/i18n/index.svelte";
   import { inline } from "../lib/md";
   import { digestText, statusText } from "../lib/status";
+  import Fox from "./Fox.svelte";
   import Glyph from "./Glyph.svelte";
 
   let { filter = $bindable(""), filtering = $bindable(false) }: { filter?: string; filtering?: boolean } = $props();
@@ -86,11 +87,12 @@
     {/if}
 
     {#each byGroup as g (g.key)}
-      <section>
+      <section class="group" data-tour={g.key === "needs_you" ? "rail-needs" : undefined}>
         <h2>{g.title()}<span class="count">{g.items.length}</span></h2>
-        {#each g.items as task (task.id)}
+        {#each g.items as task, i (task.id)}
           <button
-            class="row"
+            class="row press enter"
+            style:--i={i}
             class:selected={app.selected === task.id}
             class:open={app.view.kind === "task" && app.view.id === task.id}
             data-task={task.id}
@@ -108,7 +110,8 @@
 
     {#if !tasks.length && ov}
       <div class="empty">
-        {#if filter}{t("rail.noMatch", { q: filter })}{:else}{@html t("rail.noTasks", { key: "<kbd>n</kbd>" })}{/if}
+        <Fox state={filter ? "idle" : "sleeping"} size={36} />
+        <span>{#if filter}{t("rail.noMatch", { q: filter })}{:else}{@html t("rail.noTasks", { key: "<kbd>n</kbd>" })}{/if}</span>
       </div>
     {/if}
 
@@ -124,7 +127,7 @@
   </nav>
 
   <footer>
-    <button class="foot-link" class:on={app.view.kind === "rules"} onclick={() => app.go({ kind: "rules" })}>
+    <button class="foot-link press" class:on={app.view.kind === "rules"} data-tour="rail-rules" onclick={() => app.go({ kind: "rules" })}>
       {t("rail.rules")}
       {#if ov}<span class="hint">{t("rail.invariants", { n: ov.counts.invariants })} · {t("rail.decisions", { n: ov.counts.decisions })}{ov.counts.memory ? ` · ${t("rail.memory", { n: ov.counts.memory })}` : ""}{ov.counts.open_questions ? ` · ${t("rail.openQuestions", { n: ov.counts.open_questions })}` : ""}</span>{/if}
     </button>
@@ -144,8 +147,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
-    padding: 18px 18px 10px;
+    gap: var(--s2);
+    padding: var(--s5) var(--s5) var(--s3);
     -webkit-app-region: drag;
   }
   .repo {
@@ -166,18 +169,24 @@
     white-space: nowrap;
   }
   .filter {
-    padding: 0 12px 8px;
+    padding: 0 var(--s3) var(--s2);
   }
   .list {
     flex: 1;
     min-height: 0;
-    padding: 4px 8px 16px;
+    padding: 0 var(--s3) var(--s4);
+  }
+  .group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-bottom: var(--s1);
   }
   h2 {
     display: flex;
     align-items: center;
     gap: 6px;
-    margin: 16px 10px 4px;
+    margin: var(--s4) var(--s3) var(--s1);
     font-size: 11.5px;
     font-weight: 600;
     letter-spacing: 0.03em;
@@ -190,10 +199,10 @@
   .row {
     display: flex;
     align-items: flex-start;
-    gap: 10px;
+    gap: var(--s3);
     width: 100%;
-    padding: 8px 10px;
-    border-radius: 9px;
+    padding: var(--s2) var(--s3);
+    border-radius: 10px;
     text-align: left;
   }
   .row :global(.glyph) {
@@ -212,6 +221,7 @@
   .text {
     display: flex;
     flex-direction: column;
+    gap: 2px;
     min-width: 0;
   }
   .title {
@@ -228,8 +238,9 @@
     font-size: 12.5px;
   }
   .since {
-    margin: 6px 2px 4px;
-    padding: 10px 12px 8px;
+    margin: var(--s1) 0 var(--s2);
+    padding: var(--s3) var(--s4) var(--s2);
+    animation: enter var(--quick) var(--ease);
     border-radius: 12px;
     background: var(--elev);
     border: 1px solid var(--line);
@@ -251,10 +262,13 @@
   .since-item {
     display: block;
     width: 100%;
-    padding: 3px 0;
+    padding: var(--s1) 0;
     text-align: left;
     font-size: 12.5px;
     color: var(--text);
+  }
+  .since-task {
+    transition: color var(--fast) var(--ease);
   }
   .since-item:hover .since-task {
     color: var(--accent);
@@ -270,29 +284,36 @@
     color: var(--muted);
   }
   .empty {
-    padding: 24px 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--s3);
+    padding: var(--s5) var(--s3);
     color: var(--muted);
     font-size: 13px;
   }
   .show-done {
-    margin: 10px 10px 0;
+    margin: var(--s3) var(--s3) 0;
     color: var(--faint);
     font-size: 12.5px;
+    transition: color var(--fast) var(--ease);
   }
   .show-done:hover {
     color: var(--text);
   }
   footer {
-    padding: 10px 12px 14px;
+    padding: var(--s3) var(--s3) var(--s4);
     border-top: 1px solid var(--line);
   }
   .foot-link {
+    --press: 0.985;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
+    gap: 2px;
     width: 100%;
-    padding: 8px 10px;
-    border-radius: 9px;
+    padding: var(--s2) var(--s3);
+    border-radius: 10px;
     font-weight: 500;
     text-align: left;
   }
@@ -304,6 +325,6 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    padding: 8px 10px 0;
+    padding: var(--s3) var(--s3) 0;
   }
 </style>

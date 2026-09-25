@@ -3,12 +3,14 @@
   import { api, errorText } from "../lib/api";
   import { t } from "../lib/i18n/index.svelte";
   import { statusText } from "../lib/status";
+  import Fox, { type FoxState } from "./Fox.svelte";
   import Glyph from "./Glyph.svelte";
 
   const ov = $derived(app.overview);
   const needs = $derived((ov?.tasks ?? []).filter((x) => x.attention === "needs_you"));
   const working = $derived((ov?.tasks ?? []).filter((x) => x.attention === "working"));
   const ready = $derived((ov?.tasks ?? []).filter((x) => x.attention === "ready"));
+  const fox = $derived<FoxState>(needs.length ? "asking" : working.length ? "working" : ready.length ? "idle" : "sleeping");
 
   async function trust() {
     try {
@@ -54,17 +56,22 @@
       <div class="card problem tone-bad">{t("home.problem", { path: p.path, detail: p.detail })}</div>
     {/each}
 
-    <h1 class="calm">
-      {#if needs.length}{t("home.needs", { n: needs.length })}{:else if working.length}{t("home.nothingNow")}{:else}{t("home.quiet")}{/if}
-    </h1>
-    <p class="sub">
-      {#if working.length}{t("home.agentsWorking", { n: working.length })}{/if}
-      {#if ready.length}{t("home.tasksReady", { n: ready.length })}{/if}
-    </p>
+    <header class="greeting">
+      <Fox state={fox} size={56} />
+      <div>
+        <h1 class="calm">
+          {#if needs.length}{t("home.needs", { n: needs.length })}{:else if working.length}{t("home.nothingNow")}{:else}{t("home.quiet")}{/if}
+        </h1>
+        <p class="sub">
+          {#if working.length}{t("home.agentsWorking", { n: working.length })}{/if}
+          {#if ready.length}{t("home.tasksReady", { n: ready.length })}{/if}
+        </p>
+      </div>
+    </header>
 
-    <div class="list">
-      {#each [...needs, ...working, ...ready.slice(0, 3)] as task (task.id)}
-        <button class="row" onclick={() => app.openTask(task.id)}>
+    <div class="list" data-tour="home-needs">
+      {#each [...needs, ...working, ...ready.slice(0, 3)] as task, i (task.id)}
+        <button class="row press enter" style:--i={i} onclick={() => app.openTask(task.id)}>
           <Glyph attention={task.attention} status={task.status} />
           <span class="title">{task.title}</span>
           <span class="hint">{statusText(task)}</span>
@@ -80,30 +87,38 @@
 
 <style>
   .home {
-    max-width: 720px;
+    max-width: 760px;
     margin: 0 auto;
-    padding: 12vh 40px 60px;
+    padding: 14vh var(--s7) var(--s8);
   }
   h1 {
-    margin: 0 0 10px;
+    margin: 0 0 var(--s3);
     font-size: 22px;
     font-weight: 650;
   }
+  .greeting {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    margin-bottom: var(--s6);
+  }
   .calm {
+    margin: 0 0 var(--s1);
     font-size: 28px;
+    line-height: 1.25;
     letter-spacing: -0.015em;
   }
   .sub {
-    margin: 0 0 28px;
+    margin: 0;
     color: var(--muted);
   }
   .card {
-    margin-bottom: 14px;
+    margin-bottom: var(--s4);
   }
   .trust {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--s2);
     align-items: flex-start;
     border-color: var(--warn);
   }
@@ -113,14 +128,17 @@
   .list {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--s1);
+    /* Rows keep their own padding; pull them out so text lines up with the heading. */
+    margin: 0 calc(-1 * var(--s4));
   }
   .row {
+    --press: 0.99;
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 10px 12px;
-    border-radius: 10px;
+    gap: var(--s3);
+    padding: var(--s3) var(--s4);
+    border-radius: 12px;
     text-align: left;
   }
   .row:hover {
@@ -130,15 +148,19 @@
     font-weight: 500;
   }
   .row .hint {
+    color: var(--muted);
     margin-left: auto;
+    padding-left: var(--s4);
+    flex: none;
+    max-width: 45%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .keys {
-    margin-top: 40px;
+    margin-top: var(--s7);
     display: flex;
-    gap: 4px;
+    gap: var(--s1);
     align-items: center;
     flex-wrap: wrap;
   }
