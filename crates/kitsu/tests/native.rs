@@ -913,10 +913,22 @@ fn stop_kills_a_long_command_and_ends_the_run_cancelled() {
 
 #[test]
 fn paths_outside_the_worktree_are_refused_symlinks_included() {
+    // A directory outside the repository for the link to point at.
+    let away = std::env::temp_dir().join(format!("kitsu-native-away-{}", std::process::id()));
+    std::fs::create_dir_all(&away).expect("away");
+    let link = if cfg!(windows) {
+        // A junction, which needs no privilege. (Git's `ln -s` would copy.)
+        format!(
+            "MSYS_NO_PATHCONV=1 cmd /c mklink /J out '{}'",
+            away.display()
+        )
+    } else {
+        format!("ln -s '{}' out", away.display())
+    };
     let script = json!([
         { "tool": "write_file", "args": { "path": "../escape.txt", "content": "x" } },
         { "tool": "write_file", "args": { "path": ".git/config", "content": "x" } },
-        { "tool": "shell", "args": { "command": "ln -s /tmp out" } },
+        { "tool": "shell", "args": { "command": link } },
         { "tool": "write_file", "args": { "path": "out/kitsu-escape.txt", "content": "x" } },
         { "tool": "finish", "args": { "outcome": "blocked", "summary": "done probing" }, "expect": "resolves outside your worktree" },
     ]);
@@ -930,9 +942,15 @@ fn paths_outside_the_worktree_are_refused_symlinks_included() {
         .collect();
     assert_eq!(ends[0]["outcome"], "invalid");
     assert_eq!(ends[1]["outcome"], "invalid");
+    assert_eq!(
+        ends[2]["outcome"], "done",
+        "the link was made: {:#}",
+        ends[2]
+    );
     assert_eq!(ends[3]["outcome"], "invalid");
     assert!(!env.repo.join(".git/kitsu/worktrees/escape.txt").exists());
-    assert!(!Path::new("/tmp/kitsu-escape.txt").exists());
+    assert!(!away.join("kitsu-escape.txt").exists());
+    let _ = std::fs::remove_dir_all(&away);
 }
 
 /// Waits for `child`, answering every ask it raises with `answer`.

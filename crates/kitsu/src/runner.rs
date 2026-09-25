@@ -712,26 +712,22 @@ fn decide(policy: Policy, params: &Value, worktree: &Path) -> Decision {
     }
 }
 
+/// An approval heuristic, not a sandbox, and the UI says so: the agent
+/// writes the file itself. A relative path is judged against the worktree;
+/// one that only looks relative on Windows (`\Users\me`, `C:x`) is outside.
+/// Symlinks and junctions are followed for the part that exists.
 fn is_outside(path: &str, worktree: &Path) -> bool {
+    use std::path::Component;
     let p = Path::new(path);
     if p.is_relative() {
-        return p
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir));
+        return p.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir
+            )
+        }) || !crate::util::resolves_within(&worktree.join(p), worktree);
     }
-    // Lexical check. Symlinks inside the worktree can still point out; this
-    // is an approval heuristic, not a sandbox, and the UI says so.
-    let norm: PathBuf = p.components().fold(PathBuf::new(), |mut acc, c| {
-        match c {
-            std::path::Component::ParentDir => {
-                acc.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => acc.push(other),
-        }
-        acc
-    });
-    !norm.starts_with(worktree)
+    !crate::util::resolves_within(p, worktree)
 }
 
 async fn shut_down(child: &mut tokio::process::Child) {
@@ -869,7 +865,7 @@ impl Recorder {
                         .map(|l| {
                             Path::new(l)
                                 .strip_prefix(&self.root)
-                                .map(|p| p.display().to_string())
+                                .map(crate::util::repo_path)
                                 .unwrap_or_else(|_| l.clone())
                         })
                         .collect();
@@ -1022,9 +1018,48 @@ mod tests {
 
     #[test]
     fn policy_decisions() {
-        let wt = Path::new("/repo/.git/kitsu/worktrees/r1");
-        let inside = "/repo/.git/kitsu/worktrees/r1/src/a.rs";
-        let escape = "/repo/.git/kitsu/worktrees/r1/../../../../src/a.rs";
+        // Absolute on this platform: `C:/repo/...` on Windows.
+        let abs = |p: &str| {
+            if cfg!(windows) {
+                format!("C:{p}")
+            } else {
+                p.to_string()
+            }
+        };
+        let wt = PathBuf::from(abs("/repo/.git/kitsu/worktrees/r1"));
+        let wt = wt.as_path();
+        let inside = &abs("/repo/.git/kitsu/worktrees/r1/src/a.rs");
+        let escape = &abs("/repo/.git/kitsu/worktrees/r1/../../../../src/a.rs");
+        assert!(matches!(
+            decide(Policy::Auto, &perm("edit", "src/a.rs"), wt),
+            Decision::Answer(..)
+        ));
+        assert!(matches!(
+            decide(Policy::Auto, &perm("edit", "src/../../x"), wt),
+            Decision::Human
+        ));
+        assert!(matches!(
+            decide(
+                Policy::Auto,
+                &perm("edit", &abs("/home/me/.ssh/config")),
+                wt
+            ),
+            Decision::Human
+        ));
+        if cfg!(windows) {
+            // Not absolute there, and not in the worktree either.
+            for p in [r"\Users\me\.ssh\config", r"C:Users\me\.ssh\config"] {
+                assert!(
+                    matches!(decide(Policy::Auto, &perm("edit", p), wt), Decision::Human),
+                    "{p}"
+                );
+            }
+            let other_case = r"c:\REPO\.git\kitsu\worktrees\R1\src\a.rs";
+            assert!(matches!(
+                decide(Policy::Ask, &perm("edit", other_case), wt),
+                Decision::Answer(..)
+            ));
+        }
         assert!(
             matches!(decide(Policy::Ask, &perm("edit", inside), wt), Decision::Answer(o, _) if o == "yes")
         );
