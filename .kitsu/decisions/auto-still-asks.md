@@ -1,7 +1,7 @@
 +++
 title = "Under --policy auto, a shell command the screen catches still waits for you"
 scope = ["crates/kitsu/src/agent/host.rs"]
-state = "proposed"
+state = "accepted"
 rejected = [
   "Refusing it outright (nobody may be watching an auto run): the policy code already has an answer for what auto doesn't cover, and it is to ask; an ACP agent's request for a path outside the worktree waits for a human under auto too",
   "Screening paths under auto as triage does: /usr, /tmp and absolute paths show up in harmless commands, and auto already lets commands reach them; the screen here is for effects that land outside the worktree for certain",

@@ -1,7 +1,7 @@
 +++
 title = "A reply without a tool call is a finish only the second time in a row; a cut-off or empty reply never is"
 scope = ["crates/kitsu/src/agent/brain.rs", "crates/kitsu/src/agent/context.rs", "fixtures/stub-model/**"]
-state = "proposed"
+state = "accepted"
 rejected = [
   "Taking every reply without a call as finish (what the loop did): a first turn that narrates (\"Let me look at the code.\") stopped the run unverified before it started, and a reply cut off at max_output was verified as if the model were through",
   "Failing every call of a cut-off reply, as Pi does: a call whose arguments parse was complete when the limit hit; only the ones that don't parse are refused, and the parser already refuses them",
