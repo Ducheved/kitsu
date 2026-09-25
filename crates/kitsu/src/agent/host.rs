@@ -319,23 +319,46 @@ impl<'a> Host<'a> {
         let tool_id = call.clone();
         let ui = |status: &str| json!({ "id": tool_id, "title": title, "kind": kind(&name), "status": status, "locations": [] });
 
-        // Policy first: a denied call never starts.
-        if name == "shell" && matches!(self.policy, Policy::Ask | Policy::Triage) {
-            let verdict = triage(
-                self.policy,
-                &self.judge,
-                self.store,
-                &self.run,
-                &self.worktree,
-                &raw,
-            )
-            .await;
+        // A call that began before a crash is settled first, from what was
+        // recorded: it won't run again, so there is nothing to ask about,
+        // and a "no" must never read as "it didn't run".
+        if let Some(begin) = self.begun.get(&call).cloned()
+            && let Some((outcome, text)) = self.reconcile(&name, &begin)
+        {
+            let body = json!({ "call": call, "tool": name, "outcome": outcome, "is_error": false, "text": text, "implicit": implicit, "turn": turn, "reconciled": true });
+            self.store
+                .append(Some(&self.run), "tool.end", &body)
+                .map_err(|e| e.to_string())?;
+            self.begun.remove(&call);
+            self.ended.insert(call.clone(), body);
+            let _ = self
+                .store
+                .append(Some(&self.run), "agent.tool", &ui("completed"));
+            return Ok(result(&text, false, outcome));
+        }
+        // Then policy: a denied call never starts.
+        if name == "shell" {
+            let verdict = match self.policy {
+                Policy::Ask | Policy::Triage => Some(
+                    triage(
+                        self.policy,
+                        &self.judge,
+                        self.store,
+                        &self.run,
+                        &self.worktree,
+                        &raw,
+                    )
+                    .await,
+                ),
+                Policy::Auto => auto_screen(&self.worktree, &raw),
+            };
             let allowed = match verdict {
-                Triage::Allow {
+                None => true,
+                Some(Triage::Allow {
                     judgment,
                     p_yes,
                     threshold,
-                } => {
+                }) => {
                     self.store
                         .append(
                             Some(&self.run),
@@ -350,33 +373,16 @@ impl<'a> Host<'a> {
                     }
                     true
                 }
-                Triage::Ask { judge } => self.ask_human(&title, judge, wake).await?,
+                Some(Triage::Ask { judge }) => self.ask_human(&title, judge, wake).await?,
             };
-            match allowed {
-                true => {}
-                false => {
-                    let text = "A human declined this command. Do it another way, or call finish with outcome blocked.".to_string();
-                    self.end(&call, &name, "denied", true, &text, implicit, turn)?;
-                    let _ = self
-                        .store
-                        .append(Some(&self.run), "agent.tool", &ui("failed"));
-                    return Ok(result(&text, true, "denied"));
-                }
+            if !allowed {
+                let text = "A human declined this command. Do it another way, or call finish with outcome blocked.".to_string();
+                self.end(&call, &name, "denied", true, &text, implicit, turn)?;
+                let _ = self
+                    .store
+                    .append(Some(&self.run), "agent.tool", &ui("failed"));
+                return Ok(result(&text, true, "denied"));
             }
-        }
-        if let Some(begin) = self.begun.get(&call).cloned()
-            && let Some((outcome, text)) = self.reconcile(&name, &begin)
-        {
-            let body = json!({ "call": call, "tool": name, "outcome": outcome, "is_error": false, "text": text, "implicit": implicit, "turn": turn, "reconciled": true });
-            self.store
-                .append(Some(&self.run), "tool.end", &body)
-                .map_err(|e| e.to_string())?;
-            self.begun.remove(&call);
-            self.ended.insert(call.clone(), body);
-            let _ = self
-                .store
-                .append(Some(&self.run), "agent.tool", &ui("completed"));
-            return Ok(result(&text, false, outcome));
         }
         let pre = self.pre(&name, &raw);
         self.store
@@ -956,59 +962,75 @@ impl<'a> Host<'a> {
         let mut child = cmd
             .spawn()
             .map_err(|e| Failure::Failed(format!("could not start sh: {e}")))?;
-        let _ = self.store.set_run_pid(&self.run, child.id());
+        let group = child.id();
+        let _ = self.store.set_run_pid(&self.run, group);
         let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
             return Err(Failure::Failed("no pipes".into()));
         };
-        let readers = async { tokio::join!(capture(out), capture(err)) };
+        // Filled as the output arrives, so a timeout still has what came.
+        let (so, se) = (
+            std::sync::Mutex::new(Captured::default()),
+            std::sync::Mutex::new(Captured::default()),
+        );
+        let readers = async { tokio::join!(capture(out, &so), capture(err, &se)) };
         tokio::pin!(readers);
         let deadline = tokio::time::sleep(Duration::from_secs(timeout));
         tokio::pin!(deadline);
+        // Armed when sh exits: whatever it left running gets this long to
+        // close the pipes.
+        let drain = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(drain);
         let mut tick = tokio::time::interval(crate::runner::TICK);
-        let (stdout, stderr, why) = loop {
+        let (mut status, mut closed) = (None, false);
+        let why = loop {
+            if closed && status.is_some() {
+                break None;
+            }
             tokio::select! {
-                (o, e) = &mut readers => break (o, e, None),
-                _ = &mut deadline => break (Captured::default(), Captured::default(), Some(format!("timed out after {timeout}s; killed"))),
-                _ = wake.recv() => if self.stopping() { break (Captured::default(), Captured::default(), Some("cancelled; killed".into())) },
-                _ = tick.tick() => if self.stopping() { break (Captured::default(), Captured::default(), Some("cancelled; killed".into())) },
+                _ = &mut readers, if !closed => closed = true,
+                s = child.wait(), if status.is_none() => {
+                    status = Some(s.map_err(|e| Failure::Failed(e.to_string()))?);
+                    drain.as_mut().reset(tokio::time::Instant::now() + DRAIN);
+                }
+                _ = &mut drain, if status.is_some() && !closed => break Some(Stop::Held),
+                _ = &mut deadline => break Some(Stop::TimedOut),
+                _ = wake.recv() => if self.stopping() { break Some(Stop::Cancelled) },
+                _ = tick.tick() => if self.stopping() { break Some(Stop::Cancelled) },
             }
         };
-        if let Some(why) = why {
-            crate::runner::kill_group(&mut child).await;
-            let _ = self.store.set_run_pid(&self.run, None);
-            return Err(if why.starts_with("cancelled") {
-                Failure::Cancelled(format!("Command {why}."))
-            } else {
-                Failure::Failed(format!("Command {why}."))
-            });
-        }
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| Failure::Failed(e.to_string()))?;
-        let _ = self.store.set_run_pid(&self.run, None);
-        let mut text = format!(
-            "exit {}\n",
-            status.code().map_or("signal".into(), |c| c.to_string())
-        );
-        if !stdout.text.is_empty() {
-            text.push_str(&format!(
-                "--- stdout{} ---\n{}\n",
-                stdout.cut_note(),
-                stdout.text
-            ));
-        }
-        if !stderr.text.is_empty() {
-            text.push_str(&format!(
-                "--- stderr{} ---\n{}\n",
-                stderr.cut_note(),
-                stderr.text
-            ));
-        }
-        if status.success() {
-            Ok(text)
+        // Background processes don't outlive the command.
+        if status.is_some() {
+            kill_group(group).await;
         } else {
-            Err(Failure::Failed(text))
+            crate::runner::kill_group(&mut child).await;
+        }
+        if !closed {
+            let _ = tokio::time::timeout(Duration::from_millis(200), &mut readers).await;
+        }
+        let _ = self.store.set_run_pid(&self.run, None);
+        let take = |m: &std::sync::Mutex<Captured>| {
+            std::mem::take(&mut *m.lock().unwrap_or_else(|p| p.into_inner()))
+        };
+        let mut text = match (&why, &status) {
+            (Some(Stop::TimedOut), _) => format!("Command timed out after {timeout}s; killed.\n"),
+            (Some(Stop::Cancelled), _) => "Command cancelled; killed.\n".to_string(),
+            (_, Some(s)) => format!(
+                "exit {}\n",
+                s.code().map_or("signal".into(), |c| c.to_string())
+            ),
+            (_, None) => String::new(),
+        };
+        if why == Some(Stop::Held) {
+            text.push_str(&format!(
+                "[kitsu: sh exited, but processes it started kept its output open; they were stopped after {}s]\n",
+                DRAIN.as_secs()
+            ));
+        }
+        text.push_str(&streams(&take(&so), &take(&se)));
+        match (why, status) {
+            (Some(Stop::Cancelled), _) => Err(Failure::Cancelled(text)),
+            (None | Some(Stop::Held), Some(s)) if s.success() => Ok(text),
+            _ => Err(Failure::Failed(text)),
         }
     }
 
@@ -1126,7 +1148,7 @@ pub(crate) async fn triage(
     let Ok(a) = tools::args::<tools::Shell>(raw) else {
         return Triage::Ask { judge: None };
     };
-    if let Some(why) = screen(&a.command, worktree) {
+    if let Some(why) = screen(&a.command, worktree, true) {
         return Triage::Ask {
             judge: Some(
                 json!({ "screened": why, "note": format!("Not judged: the command {why}.") }),
@@ -1183,11 +1205,29 @@ pub(crate) async fn triage(
     }
 }
 
+/// `--policy auto` runs commands on its own, except what the screen sees
+/// reaching past the worktree: the network, git remotes and the refs every
+/// worktree shares, package installs, privileges, the git directory. Those
+/// wait for you, the way an ACP agent's request for a path outside the
+/// worktree does under auto. Paths aren't screened here: plenty of harmless
+/// commands name /usr or /tmp, and auto already lets commands reach them.
+fn auto_screen(worktree: &Path, raw: &str) -> Option<Triage> {
+    let a = tools::args::<tools::Shell>(raw).ok()?;
+    let why = screen(&a.command, worktree, false)?;
+    Some(Triage::Ask {
+        judge: Some(json!({
+            "screened": why,
+            "note": format!("Not run on its own under --policy auto: the command {why}."),
+        })),
+    })
+}
+
 /// What the host can see without a model: a command naming a path outside
-/// the worktree, the git directory, the network, package installs or more
-/// privileges is never the judge's to allow. A lexical screen, not a
-/// sandbox (decision `no-sandbox-yet`): it can only send more to you.
-fn screen(command: &str, worktree: &Path) -> Option<&'static str> {
+/// the worktree (only when `paths`), the git directory, the network, git
+/// remotes or shared refs, package installs or more privileges is never the
+/// judge's to allow. A lexical screen, not a sandbox (decision
+/// `no-sandbox-yet`): it can only send more to you.
+fn screen(command: &str, worktree: &Path, paths: bool) -> Option<&'static str> {
     const NETWORK: &[&str] = &[
         "curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "netcat", "telnet", "ftp",
         "socat",
@@ -1209,6 +1249,28 @@ fn screen(command: &str, worktree: &Path) -> Option<&'static str> {
         "submodule",
         "config",
     ];
+    for (sub, rest) in git_commands(command) {
+        if GIT_REMOTE.contains(&sub) {
+            return Some("reaches a git remote or changes git's configuration");
+        }
+        let named = rest.iter().any(|w| !w.starts_with('-'));
+        let first = rest.first().copied().unwrap_or("");
+        let shared = match sub {
+            "update-ref" | "symbolic-ref" | "filter-branch" | "replace" | "gc" | "prune" => true,
+            // Listing is fine; naming a branch or tag creates, moves or deletes it.
+            "branch" | "tag" => named,
+            "stash" => !matches!(first, "list" | "show"),
+            "worktree" => first != "list",
+            "reflog" => matches!(first, "expire" | "delete"),
+            "checkout" | "switch" => rest
+                .iter()
+                .any(|w| matches!(*w, "-b" | "-B" | "-c" | "-C" | "--orphan")),
+            _ => false,
+        };
+        if shared {
+            return Some("changes git refs other worktrees share");
+        }
+    }
     let words: Vec<&str> = command
         .split(|c: char| c.is_whitespace() || ";|&()<>'\"`=".contains(c))
         .filter(|w| !w.is_empty())
@@ -1223,13 +1285,10 @@ fn screen(command: &str, worktree: &Path) -> Option<&'static str> {
         if PRIVILEGE.contains(&prog) {
             return Some("asks for more privileges");
         }
-        if prog == "git" && GIT_REMOTE.contains(&next) {
-            return Some("reaches a git remote or changes git's configuration");
-        }
         if PACKAGES.contains(&prog) && INSTALL.contains(&next) {
             return Some("installs or publishes packages");
         }
-        if w.starts_with('~') || w.contains("$HOME") || w.contains("${HOME}") {
+        if paths && (w.starts_with('~') || w.contains("$HOME") || w.contains("${HOME}")) {
             return Some("names a path outside the worktree");
         }
         // The worktree itself sits under the git common dir; judge what
@@ -1241,13 +1300,14 @@ fn screen(command: &str, worktree: &Path) -> Option<&'static str> {
                 .and_then(|r| r.strip_prefix('/'))
         };
         let rel = inside.unwrap_or(w);
-        if rel.split('/').any(|c| c == "..") {
+        if paths && rel.split('/').any(|c| c == "..") {
             return Some("names a path outside the worktree");
         }
         if rel.split('/').any(|c| c == ".git") {
             return Some("touches the git directory");
         }
-        if inside.is_none()
+        if paths
+            && inside.is_none()
             && w.starts_with('/')
             && !matches!(*w, "/dev/null" | "/dev/stdout" | "/dev/stderr")
         {
@@ -1255,6 +1315,35 @@ fn screen(command: &str, worktree: &Path) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// Each `git` invocation in `command`: its subcommand and the words after
+/// it, skipping git's own options (`-C <dir>`, `-c <key=value>`, ...).
+fn git_commands(command: &str) -> Vec<(&str, Vec<&str>)> {
+    command
+        .split(|c: char| ";|&()`\n".contains(c))
+        .filter_map(|part| {
+            let w: Vec<&str> = part
+                .split(|c: char| c.is_whitespace() || "<>'\"".contains(c))
+                .filter(|w| !w.is_empty())
+                .collect();
+            let mut i = w.iter().position(|x| x.rsplit('/').next() == Some("git"))? + 1;
+            while let Some(x) = w.get(i).filter(|x| x.starts_with('-')) {
+                i += if matches!(
+                    *x,
+                    "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace"
+                ) {
+                    2
+                } else {
+                    1
+                };
+            }
+            Some((
+                w.get(i).copied()?,
+                w.get(i + 1..).unwrap_or_default().to_vec(),
+            ))
+        })
+        .collect()
 }
 
 pub enum Failure {
@@ -1339,64 +1428,131 @@ fn write_atomic(p: &Path, bytes: &[u8]) -> std::result::Result<(), String> {
     })
 }
 
+/// How long whatever a command left running may hold its output open after
+/// it exits.
+const DRAIN: Duration = Duration::from_secs(2);
+
+/// Why a command's call ended before its output did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Stop {
+    /// sh exited; something it started kept the pipes open past `DRAIN`.
+    Held,
+    TimedOut,
+    Cancelled,
+}
+
+/// Kill what is left of a process group whose leader was already reaped.
+async fn kill_group(group: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pid) = group {
+        let _ = tokio::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+    #[cfg(not(unix))]
+    let _ = group;
+}
+
+/// One stream's output: 8 KiB of head and 16 KiB of tail, and how much
+/// there was. A command that prints gigabytes costs time, not memory.
 #[derive(Default)]
 struct Captured {
-    text: String,
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
     total: usize,
 }
 
 impl Captured {
-    fn cut_note(&self) -> String {
-        if self.total > self.text.len() + 64 {
-            format!(" ({} bytes, head and tail)", self.total)
-        } else {
-            String::new()
+    const HEAD: usize = 8 * 1024;
+    const TAIL: usize = 16 * 1024;
+
+    fn push(&mut self, mut chunk: &[u8]) {
+        self.total += chunk.len();
+        if self.head.len() < Self::HEAD {
+            let take = (Self::HEAD - self.head.len()).min(chunk.len());
+            self.head.extend_from_slice(&chunk[..take]);
+            chunk = &chunk[take..];
         }
+        self.tail.extend(chunk);
+        let over = self.tail.len().saturating_sub(Self::TAIL);
+        self.tail.drain(..over);
+    }
+
+    /// What was kept, as bytes.
+    fn kept(&self) -> usize {
+        self.head.len() + self.tail.len()
+    }
+
+    /// At most about `budget` bytes: a third from the start, the rest from
+    /// the end (where test summaries and compiler errors are), and how many
+    /// bytes were cut in between.
+    fn render(&self, budget: usize) -> String {
+        let tail: Vec<u8> = self.tail.iter().copied().collect();
+        let all = [self.head.as_slice(), tail.as_slice()].concat();
+        let lossy = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        if self.total == all.len() && all.len() <= budget {
+            return lossy(&all).trim_end().to_string();
+        }
+        // Nothing lost while capturing: head and tail are one piece.
+        let (first, last) = if self.total == all.len() {
+            (all.as_slice(), all.as_slice())
+        } else {
+            (self.head.as_slice(), tail.as_slice())
+        };
+        let h = (budget / 3).min(first.len());
+        let t = (budget - h).min(last.len());
+        format!(
+            "{}\n[kitsu: {} bytes cut from the middle]\n{}",
+            lossy(&first[..h]),
+            self.total - h - t,
+            lossy(&last[last.len() - t..]).trim_end()
+        )
     }
 }
 
-/// Read a pipe to its end, keeping 8 KiB of head and 16 KiB of tail: a
-/// command that prints gigabytes costs time, not memory.
-async fn capture(mut r: impl tokio::io::AsyncRead + Unpin) -> Captured {
-    const HEAD: usize = 8 * 1024;
-    const TAIL: usize = 16 * 1024;
-    let mut head = Vec::new();
-    let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
-    let mut total = 0usize;
+/// Read a pipe to its end into `into`.
+async fn capture(mut r: impl tokio::io::AsyncRead + Unpin, into: &std::sync::Mutex<Captured>) {
     let mut buf = [0u8; 8192];
     loop {
         match r.read(&mut buf).await {
             Ok(0) | Err(_) => break,
-            Ok(n) => {
-                total += n;
-                let mut chunk = &buf[..n];
-                if head.len() < HEAD {
-                    let take = (HEAD - head.len()).min(chunk.len());
-                    head.extend_from_slice(&chunk[..take]);
-                    chunk = &chunk[take..];
-                }
-                tail.extend(chunk);
-                while tail.len() > TAIL {
-                    tail.pop_front();
-                }
-            }
+            Ok(n) => into
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(&buf[..n]),
         }
     }
-    let mut text = String::from_utf8_lossy(&head).into_owned();
-    if !tail.is_empty() {
-        let tail: Vec<u8> = tail.into_iter().collect();
-        if total > head.len() + tail.len() {
-            text.push_str(&format!(
-                "\n[kitsu: {} bytes cut from the middle]\n",
-                total - head.len() - tail.len()
-            ));
+}
+
+/// Both streams within one tool result: each gets half, and what one
+/// doesn't need goes to the other, so the end of each always shows.
+fn streams(stdout: &Captured, stderr: &Captured) -> String {
+    let budget = tools::MAX_RESULT - 1024;
+    let half = budget / 2;
+    let (o, e) = (stdout.kept(), stderr.kept());
+    let (bo, be) = if o <= half {
+        (o, budget - o)
+    } else if e <= half {
+        (budget - e, e)
+    } else {
+        (half, budget - half)
+    };
+    let mut text = String::new();
+    for (name, c, b) in [("stdout", stdout, bo), ("stderr", stderr, be)] {
+        let shown = c.render(b);
+        if shown.is_empty() {
+            continue;
         }
-        text.push_str(&String::from_utf8_lossy(&tail));
+        let note = if c.total > b {
+            format!(" ({} bytes, head and tail)", c.total)
+        } else {
+            String::new()
+        };
+        text.push_str(&format!("--- {name}{note} ---\n{shown}\n"));
     }
-    Captured {
-        text: text.trim_end().to_string(),
-        total,
-    }
+    text
 }
 
 /// Earlier runs that `run` resumes, oldest first. A run resumes its
@@ -1625,7 +1781,7 @@ mod tests {
             "git status",
             "cargo build",
         ] {
-            assert_eq!(screen(cmd, Path::new(WT)), None, "{cmd}");
+            assert_eq!(screen(cmd, Path::new(WT), true), None, "{cmd}");
         }
         // Arguments that don't parse: you decide, no judgment.
         let t = tokio::runtime::Builder::new_current_thread()
@@ -1641,5 +1797,54 @@ mod tests {
                 "{\"cmd\": 1}",
             ));
         assert_eq!(t, Triage::Ask { judge: None });
+    }
+
+    #[test]
+    fn auto_still_asks_about_what_reaches_past_the_worktree() {
+        let wt = Path::new(WT);
+        let remote = "reaches a git remote or changes git's configuration";
+        let refs = "changes git refs other worktrees share";
+        for (cmd, why) in [
+            ("git push origin HEAD", remote),
+            ("git -C . -c core.pager=cat push", remote),
+            ("cargo test && git fetch", remote),
+            ("git update-ref refs/heads/main HEAD", refs),
+            ("git branch -f main HEAD", refs),
+            ("git branch new-branch", refs),
+            ("git tag v1", refs),
+            ("git stash", refs),
+            ("git checkout -b feature", refs),
+            ("git worktree add ../x", refs),
+            ("curl -s https://example.com", "uses the network"),
+            ("sudo true", "asks for more privileges"),
+            ("pip install requests", "installs or publishes packages"),
+            ("cat .git/config", "touches the git directory"),
+        ] {
+            assert_eq!(screen(cmd, wt, false), Some(why), "{cmd}");
+            let Some(Triage::Ask { judge: Some(j) }) = auto_screen(wt, &shell(cmd)) else {
+                panic!("{cmd} runs on its own");
+            };
+            assert_eq!(j["screened"], why);
+        }
+        for cmd in [
+            "git status",
+            "git branch",
+            "git branch --show-current",
+            "git tag -l",
+            "git stash list",
+            "git log --oneline",
+            "git commit -qm x",
+            "git checkout -- a.py",
+            "ln -s /tmp out",
+            "ls ~ /usr/include",
+            "cargo test",
+        ] {
+            assert_eq!(auto_screen(wt, &shell(cmd)), None, "{cmd}");
+        }
+        // Paths still count under triage.
+        assert_eq!(
+            screen("ln -s /tmp out", wt, true),
+            Some("names a path outside the worktree")
+        );
     }
 }

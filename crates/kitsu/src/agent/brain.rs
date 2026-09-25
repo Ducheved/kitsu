@@ -17,6 +17,30 @@ use crate::util::content_id;
 /// Attempts per model request for errors worth retrying.
 const ATTEMPTS: u32 = 5;
 
+/// Replies in a row cut off at the output limit before the run stops.
+const MAX_CUTS: usize = 3;
+
+/// Said once to a reply with neither a tool call nor a cut: the next one
+/// like it is taken as `finish`.
+const NO_CALL: &str = "Your reply had no tool call. To keep working, call a tool. When you are done, call finish with outcome done (Kitsu then runs the required checks) or blocked. Another reply in a row without a tool call is taken as finish with outcome done.";
+
+/// The reply stopped because it reached `max_output`, not because the
+/// model was through: each format names it differently.
+fn cut_off(finish: Option<&str>) -> bool {
+    matches!(finish, Some("length" | "max_tokens" | "max_output_tokens"))
+}
+
+fn cut_note(max_output: u64, call: bool) -> String {
+    let what = if call {
+        "before this call's arguments were complete, so it did not run"
+    } else {
+        "and was cut off"
+    };
+    format!(
+        "Your reply hit the output limit ({max_output} tokens) {what}. Send less per reply: write a large file in parts (write_file with the first part, then edit_file to add the rest)."
+    )
+}
+
 /// Why the loop ended. `Failed` ends the run as failed; `Stopped` as
 /// finished with that reason.
 #[derive(Debug, Clone, PartialEq)]
@@ -86,6 +110,13 @@ async fn drive(
     let mut overflowed = false;
     let mut loops = super::loops::Detector::default();
     let mut tree = String::new();
+    // Replies in a row, newest last, that hit the output limit.
+    let mut cuts = entries
+        .iter()
+        .filter(|e| e["kind"] == "model.response")
+        .rev()
+        .take_while(|e| cut_off(e["body"]["finish"].as_str()))
+        .count();
 
     loop {
         if *cancel.borrow() {
@@ -99,6 +130,18 @@ async fn drive(
                 tree = t.clone();
             }
             let mut text = r.text;
+            // Arguments that don't parse in a reply that was cut off: the
+            // limit cut them, and the model should know it was that.
+            if cuts > 0 && r.outcome.as_deref() == Some("invalid") {
+                let note = cut_note(max_output, true);
+                append(
+                    link,
+                    "loop.signal",
+                    json!({ "call": c.id, "kind": "cut_off", "note": note }),
+                )
+                .await?;
+                text = format!("{text}\n{note}");
+            }
             match loops.observe(&c.name, &c.arguments, &tree) {
                 Some(1) => {
                     append(
@@ -120,6 +163,9 @@ async fn drive(
             if let Some(stop) = r.stop {
                 return Ok(End::Stopped(stop));
             }
+        }
+        if cuts >= MAX_CUTS {
+            return Ok(stop(link, "output_limit").await);
         }
         if conv.turns().saturating_sub(earlier_turns) >= max_turns {
             return Ok(stop(link, "budget_turns").await);
@@ -222,6 +268,12 @@ async fn drive(
         append(link, "model.response", response).await?;
         conv.calls_issued += calls.len() as u64;
         let no_calls = calls.is_empty();
+        let cut = cut_off(reply.finish.as_deref());
+        cuts = if cut { cuts + 1 } else { 0 };
+        let nudged = conv
+            .steps
+            .last()
+            .is_some_and(|s| s.calls.is_empty() && s.notice.as_deref() == Some(NO_CALL));
         conv.steps.push(Step {
             turn,
             text: reply.text.clone(),
@@ -230,8 +282,27 @@ async fn drive(
             replay: reply.replay,
         });
 
-        // A reply with nothing to do is the model saying it's done. That is a
-        // request for verification, same as calling finish.
+        // A reply without a call that was cut off isn't done, and the first
+        // one that wasn't may be narration: say so, and go on.
+        let note = match (no_calls, cut, nudged) {
+            (true, true, _) => Some(("cut_off", cut_note(max_output, false))),
+            (true, false, false) => Some(("no_call", NO_CALL.to_string())),
+            _ => None,
+        };
+        if let Some((kind, note)) = note {
+            append(
+                link,
+                "loop.signal",
+                json!({ "turn": turn, "kind": kind, "note": note }),
+            )
+            .await?;
+            if let Some(s) = conv.steps.last_mut() {
+                s.notice = Some(note);
+            }
+            continue;
+        }
+        // Otherwise a reply with nothing to do is the model saying it's
+        // done. That is a request for verification, same as calling finish.
         if no_calls {
             let args =
                 json!({ "outcome": "done", "summary": reply.text.clone().unwrap_or_default() })
@@ -260,6 +331,7 @@ struct ToolResult {
     text: String,
     stop: Option<String>,
     tree: Option<String>,
+    outcome: Option<String>,
 }
 
 async fn call_tool(
@@ -284,6 +356,7 @@ async fn call_tool(
     Ok(ToolResult {
         text,
         stop: r["_meta"]["kitsu/stop"].as_str().map(str::to_string),
+        outcome: r["_meta"]["kitsu/outcome"].as_str().map(str::to_string),
         tree: r["_meta"]["kitsu/tree"].as_str().map(str::to_string),
     })
 }
@@ -304,6 +377,9 @@ async fn stop(link: &HostLink, reason: &str) -> End {
 
 /// One model request, retried only for errors that say retrying can help,
 /// with a bounded number of attempts. Each failed attempt is journaled.
+/// A reply with neither text nor a call is one of those: it has nothing to
+/// act on or answer, and in the conversation it would be a message some
+/// providers refuse.
 async fn request(
     link: &HostLink,
     provider: &Provider,
@@ -315,6 +391,10 @@ async fn request(
     loop {
         attempt += 1;
         let e = match provider.complete(body, cancel).await {
+            Ok(r) if r.text.is_none() && r.calls.is_empty() => ProviderError::Transient(format!(
+                "empty reply: no text and no tool call (finish reason {})",
+                r.finish.as_deref().unwrap_or("none")
+            )),
             Ok(r) => return Ok(Ok(r)),
             Err(e) => e,
         };

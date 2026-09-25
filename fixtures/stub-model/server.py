@@ -28,6 +28,12 @@ A script is a JSON list, one entry per model request, played in order:
   {"status": 429, "retry_after": 0}                         an HTTP error (429, 529, 500, 401...)
   {"stream_error": true}                                    a 200 whose stream fails (Messages: overloaded_error, Responses: response.failed)
   {"expect": "substring"}  (on any entry) the request must contain it, or 500
+Chat Completions only:
+  {"raw_tools": [{"tool": ..., "arguments": "<verbatim>", "id": null, "index": N}]}
+                                                            calls sent as given (arguments
+                                                            unparsed, id omitted when null)
+  {"empty": true}                                           a reply with no text and no call
+  {"finish": "length"}  (on any entry) the finish_reason sent instead of stop/tool_calls
 Optional "usage": {"input": N, "output": M, "cached": C, "cache_write": W} on
 any entry ("input" is what wasn't read from the cache). Past the end of the
 script every request gets {"text": "script finished"}.
@@ -98,12 +104,13 @@ def openai_text(body):
 
 
 def scripted(text):
-    """The next script entry as ('tools', [(name, args)], usage) / ('text', str, usage) / ('overflow',) / ('error', msg)."""
+    """The next script entry as ('tools', [(name, args)], usage, entry) / ('text', str, usage, entry) /
+    ('raw', [call], usage, entry) / ('empty', None, usage, entry) / ('overflow',) / ('error', msg)."""
     with LOCK:
         i = STATE["step"]
         STATE["step"] += 1
     if i >= len(SCRIPT):
-        return ("text", "script finished", {})
+        return ("text", "script finished", {}, {})
     e = SCRIPT[i]
     if "expect" in e and e["expect"] not in text:
         return ("error", f"script step {i}: request does not contain {e['expect']!r}")
@@ -115,10 +122,14 @@ def scripted(text):
     if "status" in e:
         return ("http", e["status"], e.get("retry_after"))
     if "tool" in e:
-        return ("tools", [(e["tool"], e.get("args", {}))], usage)
+        return ("tools", [(e["tool"], e.get("args", {}))], usage, e)
     if "tools" in e:
-        return ("tools", [(t["tool"], t.get("args", {})) for t in e["tools"]], usage)
-    return ("text", e.get("text", ""), usage)
+        return ("tools", [(t["tool"], t.get("args", {})) for t in e["tools"]], usage, e)
+    if "raw_tools" in e:
+        return ("raw", e["raw_tools"], usage, e)
+    if e.get("empty"):
+        return ("empty", None, usage, e)
+    return ("text", e.get("text", ""), usage, e)
 
 
 def plan(body, args):
@@ -224,14 +235,31 @@ class Handler(BaseHTTPRequestHandler):
         mid = f"chatcmpl-{int(time.time() * 1000)}"
         model = body.get("model", "stub")
         if reply[0] == "tools":
-            calls = [{"id": f"call_{mid}_{k}", "type": "function",
+            calls = [{"index": k, "id": f"call_{mid}_{k}", "type": "function",
                       "function": {"name": name, "arguments": json.dumps(a)}} for k, (name, a) in enumerate(reply[1])]
             message = {"role": "assistant", "content": None, "tool_calls": calls}
             finish = "tool_calls"
+        elif reply[0] == "raw":
+            calls = []
+            for k, t in enumerate(reply[1]):
+                c = {"index": t.get("index", k), "type": "function",
+                     "function": {"name": t.get("tool", ""), "arguments": t.get("arguments", "")}}
+                if t.get("id", f"call_{mid}_{k}") is not None:
+                    c["id"] = t.get("id", f"call_{mid}_{k}")
+                calls.append(c)
+            message = {"role": "assistant", "content": None, "tool_calls": calls}
+            finish = "tool_calls"
+        elif reply[0] == "empty":
+            message = {"role": "assistant", "content": None}
+            finish = "stop"
         else:
             message = {"role": "assistant", "content": reply[1]}
             finish = "stop"
+        entry = reply[3] if len(reply) > 3 else {}
+        finish = entry.get("finish", finish)
         if not body.get("stream"):
+            if message.get("tool_calls"):
+                message = dict(message, tool_calls=[{k: v for k, v in tc.items() if k != "index"} for tc in message["tool_calls"]])
             self._json(200, {"id": mid, "object": "chat.completion", "created": int(time.time()), "model": model,
                              "choices": [{"index": 0, "message": message, "finish_reason": finish}], "usage": u})
             return
@@ -246,12 +274,14 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"data: {json.dumps(c)}\n\n".encode())
             self.wfile.flush()
         chunk({"role": "assistant"})
-        if reply[0] == "tools":
-            for k, tc in enumerate(message["tool_calls"]):
-                chunk({"tool_calls": [{"index": k, "id": tc["id"], "type": "function",
-                                       "function": {"name": tc["function"]["name"], "arguments": ""}}]})
-                chunk({"tool_calls": [{"index": k, "function": {"arguments": tc["function"]["arguments"]}}]})
-        else:
+        if message.get("tool_calls"):
+            for tc in message["tool_calls"]:
+                first = {"index": tc["index"], "type": "function", "function": {"name": tc["function"]["name"], "arguments": ""}}
+                if "id" in tc:
+                    first["id"] = tc["id"]
+                chunk({"tool_calls": [first]})
+                chunk({"tool_calls": [{"index": tc["index"], "function": {"arguments": tc["function"]["arguments"]}}]})
+        elif message["content"] is not None:
             chunk({"content": message["content"]})
         chunk({}, finish)
         if (body.get("stream_options") or {}).get("include_usage"):
