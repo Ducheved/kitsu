@@ -1,7 +1,7 @@
 +++
 title = "Kitsu's own loop marks cache breakpoints for Anthropic models; the ledger stays after the last mark"
 scope = ["crates/kitsu/src/agent/provider.rs", "crates/kitsu/src/agent/context.rs"]
-state = "proposed"
+state = "accepted"
 rejected = [
   "Top-level automatic `cache_control`: its breakpoint lands on the last block, the ledger, which changes on every request, so each request writes a cache nothing reads",
   "Marks for every model: OpenAI, DeepSeek and Gemini cache on their own, and a plain OpenAI-compatible server may refuse a field it doesn't know",
