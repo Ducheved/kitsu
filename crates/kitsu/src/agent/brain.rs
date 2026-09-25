@@ -50,6 +50,12 @@ async fn drive(
             .to_string(),
     };
     let tools = session["tools"].clone();
+    let tools_bytes = tools.to_string().len();
+    let window = session["model"]["window"].as_u64().unwrap_or(128_000);
+    let max_output = session["model"]["max_output"].as_u64().unwrap_or(16_000);
+    // What a request may hold, and the verbatim tail compaction keeps.
+    let budget = window.saturating_sub(max_output);
+    let tail = (budget / 4).min(20_000);
     let max_turns = session["budgets"]["turns"].as_u64().unwrap_or(150);
     let max_tokens = session["budgets"]["tokens"].as_u64().unwrap_or(u64::MAX);
 
@@ -67,6 +73,9 @@ async fn drive(
         .sum();
     let mut conv = context::fold(&entries);
     let mut last_prompt: Option<u64> = None;
+    // Set after the provider said the last request didn't fit: compact
+    // harder and retry once; a second overflow in a row ends the run.
+    let mut overflowed = false;
 
     loop {
         if *cancel.borrow() {
@@ -101,21 +110,51 @@ async fn drive(
         let ledger = link
             .call(protocol::STATE, json!({ "turn": turn, "tokens": tokens, "context": last_prompt, "warnings": warnings }))
             .await?;
-        let msgs = context::render(&prefix, &conv, ledger["text"].as_str().unwrap_or(""));
+        let ledger = ledger["text"].as_str().unwrap_or("").to_string();
+        let mut msgs = context::render(&prefix, &conv, &ledger);
+        let est = context::estimate(&msgs, tools_bytes);
+        // After a real overflow only the newest step is kept verbatim.
+        let trigger = if overflowed {
+            Some(("overflow", budget * 2 / 5, 0))
+        } else if est.saturating_mul(5) > budget.saturating_mul(4) {
+            Some(("threshold", budget / 2, tail))
+        } else {
+            None
+        };
+        if let Some((why, target, tail)) = trigger {
+            let c = context::compact(&prefix, &conv, &ledger, tools_bytes, target, tail);
+            let shrank = (!c.elided.is_empty() || c.cut > conv.cut) && c.after < c.before;
+            if shrank {
+                append(
+                    link,
+                    "ctx.compacted",
+                    json!({
+                        "k": conv.compactions + 1, "trigger": why, "turn": turn,
+                        "elided": c.elided.iter().map(|(call, pointer)| json!({ "call": call, "pointer": pointer })).collect::<Vec<_>>(),
+                        "cut": c.cut, "digest": c.digest, "before": c.before, "after": c.after, "algo": "v1",
+                    }),
+                )
+                .await?;
+                conv.apply(&c);
+                msgs = context::render(&prefix, &conv, &ledger);
+            } else if overflowed {
+                // It didn't fit and there's nothing left to shrink: sending
+                // the same request again would only overflow again.
+                return Ok(stop(link, "context_overflow").await);
+            }
+        }
         let body = provider.body(&msgs, &tools);
         let request_sha = content_id(body.to_string().as_bytes());
 
         let reply = match request(link, provider, &body, turn, &mut cancel).await? {
             Ok(r) => r,
             Err(ProviderError::Cancelled) => return Ok(End::Stopped("cancelled".into())),
-            Err(ProviderError::Overflow(d)) => {
-                append(
-                    link,
-                    "model.error",
-                    json!({ "turn": turn, "class": "overflow", "detail": d }),
-                )
-                .await?;
+            Err(ProviderError::Overflow(_)) if overflowed => {
                 return Ok(stop(link, "context_overflow").await);
+            }
+            Err(ProviderError::Overflow(_)) => {
+                overflowed = true;
+                continue;
             }
             Err(e) => return Ok(End::Failed(format!("model provider: {}", e.detail()))),
         };
@@ -136,6 +175,7 @@ async fn drive(
         let used = reply.usage.prompt.unwrap_or(0) + reply.usage.completion.unwrap_or(0);
         tokens += used;
         last_prompt = reply.usage.prompt;
+        overflowed = false;
         append(
             link,
             "model.response",

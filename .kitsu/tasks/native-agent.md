@@ -8,10 +8,13 @@ retries), brain/host over JSON-RPC, the 12 tools, pinned prefix and
 ledger, `finish` verified by checks, turn and token budgets, the key
 never written. Tests in crates/kitsu/tests/native.rs.
 
+Compaction is in: over 80% of the window, old tool outputs become
+pointers, then older steps a digest regenerated from the journal; on the
+provider's overflow error only the newest step is kept verbatim and the
+request is retried once, or not at all if nothing could shrink. The
+harness and the brief are byte-identical in every request.
+
 Still to do, each with a scripted-stub test that fails without it:
-- Compaction (elide old tool outputs, then a digest regenerated from the
-  journal) on a proactive threshold and on the provider's overflow error,
-  with exactly one retry; the prefix stays byte-identical.
 - Resume after a crash: `--from rX --resume`; `tool.begin` without an end
   is settled from `pre` (applied / not applied / unknown), never repeated.
 - Doom-loop signal: the same call three times in eight with no change to

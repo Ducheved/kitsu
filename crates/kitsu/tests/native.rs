@@ -61,7 +61,7 @@ impl Drop for Env {
     fn drop(&mut self) {
         let _ = self.stub.kill();
         let _ = self.stub.wait();
-        if !std::thread::panicking() {
+        if !std::thread::panicking() && std::env::var_os("KITSU_KEEP").is_none() {
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
@@ -418,4 +418,150 @@ fn a_plain_http_endpoint_elsewhere_is_refused_before_any_run() {
         "{}",
         String::from_utf8_lossy(&o.stderr)
     );
+}
+
+#[test]
+fn compaction_keeps_the_brief_and_the_newest_step_and_one_overflow_is_survived() {
+    let big: String = (1..=60)
+        .map(|i| format!("{i:03} {}\n", "x".repeat(95)))
+        .collect();
+    let script = json!([
+        { "tool": "write_file", "args": { "path": "big.txt", "content": big } },
+        { "tool": "read_file", "args": { "path": "big.txt" } },
+        { "tool": "read_file", "args": { "path": "big.txt", "start_line": 2 } },
+        // Over 80% of the window: old outputs became pointers first.
+        { "tool": "write_file", "args": { "path": "payments.py", "content": good_payments() }, "expect": "elided at compaction 1" },
+        { "overflow": true },
+        // The provider said it didn't fit: compacted harder, retried once.
+        { "tool": "finish", "args": { "outcome": "done", "summary": "Bounded, one key." }, "expect": "compaction 2" },
+    ]);
+    let env = Env::new(
+        "compact",
+        &script,
+        ", context_window = 13000, max_output = 1000",
+    );
+    let o = env.run("rn4", &[]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        stop_reason(&env, "rn4"),
+        (RunState::Finished, Some("verified".into()))
+    );
+
+    let ev = env.events("rn4");
+    let compactions: Vec<&Value> = ev
+        .iter()
+        .filter(|(k, _)| k == "ctx.compacted")
+        .map(|(_, b)| b)
+        .collect();
+    assert_eq!(compactions.len(), 2, "{compactions:#?}");
+    assert_eq!(
+        (
+            compactions[0]["trigger"].as_str(),
+            compactions[1]["trigger"].as_str()
+        ),
+        (Some("threshold"), Some("overflow"))
+    );
+    assert!(
+        compactions
+            .iter()
+            .all(|c| c["after"].as_u64() < c["before"].as_u64())
+    );
+
+    let reqs = env.requests();
+    assert_eq!(reqs.len(), 6);
+    let first = &reqs[0]["body"]["messages"];
+    for r in &reqs {
+        let m = &r["body"]["messages"];
+        assert_eq!(
+            (&m[0], &m[1]),
+            (&first[0], &first[1]),
+            "the harness and the brief never change"
+        );
+        let last = m.as_array().and_then(|a| a.last()).expect("last");
+        assert!(
+            last["content"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("# Kitsu: state of your run")),
+            "the ledger is last"
+        );
+    }
+    // Right after the first compaction the newest step is still verbatim.
+    let m = reqs[3]["body"]["messages"].as_array().expect("messages");
+    let tool_results: Vec<&str> = m
+        .iter()
+        .filter(|x| x["role"] == "tool")
+        .filter_map(|x| x["content"].as_str())
+        .collect();
+    assert!(
+        tool_results
+            .last()
+            .is_some_and(|t| t.starts_with("2\t002 ")),
+        "{tool_results:?}"
+    );
+    assert!(
+        tool_results
+            .first()
+            .is_some_and(|t| t.starts_with("[kitsu: output of write_file big.txt elided")),
+        "{tool_results:?}"
+    );
+    // Every tool call in every request is answered: no step was split.
+    for r in &reqs {
+        let m = r["body"]["messages"].as_array().expect("messages");
+        let asked: usize = m
+            .iter()
+            .filter_map(|x| x["tool_calls"].as_array())
+            .map(|c| c.len())
+            .sum();
+        let answered = m.iter().filter(|x| x["role"] == "tool").count();
+        assert_eq!(asked, answered);
+    }
+}
+
+#[test]
+fn two_overflows_in_a_row_stop_the_run_instead_of_looping() {
+    let big: String = (1..=60)
+        .map(|i| format!("{i:03} {}\n", "x".repeat(95)))
+        .collect();
+    let env = Env::new(
+        "overflow2",
+        &json!([
+            { "tool": "write_file", "args": { "path": "big.txt", "content": big } },
+            { "tool": "read_file", "args": { "path": "big.txt" } },
+            { "tool": "read_file", "args": { "path": "big.txt", "start_line": 2 } },
+            { "overflow": true },
+            { "overflow": true },
+            { "text": "unreachable" },
+        ]),
+        "",
+    );
+    let o = env.run("rn5", &[]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        stop_reason(&env, "rn5"),
+        (RunState::Finished, Some("context_overflow".into()))
+    );
+    assert_eq!(
+        env.requests().len(),
+        5,
+        "compacted once, retried once, then stopped"
+    );
+    let compactions = env
+        .events("rn5")
+        .iter()
+        .filter(|(k, _)| k == "ctx.compacted")
+        .count();
+    assert_eq!(compactions, 1);
+
+    // Nothing to shrink: the same request would overflow again, so it isn't sent.
+    let env = Env::new(
+        "overflow0",
+        &json!([{ "overflow": true }, { "text": "unreachable" }]),
+        "",
+    );
+    assert!(env.run("rn6", &[]).status.success());
+    assert_eq!(
+        stop_reason(&env, "rn6"),
+        (RunState::Finished, Some("context_overflow".into()))
+    );
+    assert_eq!(env.requests().len(), 1);
 }
