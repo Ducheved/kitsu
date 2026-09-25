@@ -1,6 +1,8 @@
 <script lang="ts">
   import { app } from "../lib/app.svelte";
   import { type Key, t } from "../lib/i18n/index.svelte";
+  import { tour } from "../lib/tour.svelte";
+  import Fox from "./Fox.svelte";
 
   const groups: [Key, [string, Key][]][] = [
     [
@@ -56,17 +58,26 @@
         </section>
       {/each}
     </div>
-    <label class="vim">
-      <input
-        type="checkbox"
-        checked={app.prefs.vim}
-        onchange={(e) => {
-          app.prefs.vim = (e.currentTarget as HTMLInputElement).checked;
-          app.savePrefs();
-        }}
-      />
-      {t("settings.vim")}
-    </label>
+    <div class="foot">
+      <label class="vim">
+        <input
+          type="checkbox"
+          checked={app.prefs.vim}
+          onchange={(e) => {
+            app.prefs.vim = (e.currentTarget as HTMLInputElement).checked;
+            app.savePrefs();
+          }}
+        />
+        {t("settings.vim")}
+      </label>
+      <button
+        class="btn learn"
+        onclick={() => {
+          app.overlay = null;
+          tour.start();
+        }}><Fox size={22} />{t("cmd.tour")}</button
+      >
+    </div>
   </div>
 </div>
 
@@ -78,26 +89,30 @@
     display: grid;
     place-items: center;
     background: var(--overlay);
+    animation: fade-in var(--fast) var(--ease);
   }
   .help {
     width: min(720px, 94vw);
-    padding: 24px 28px;
+    max-height: 92vh;
+    overflow: auto;
+    padding: var(--s5) var(--s6);
     border-radius: 16px;
     background: var(--elev);
     box-shadow: var(--shadow);
     border: 1px solid var(--line);
+    animation: pop-in var(--quick) var(--ease);
   }
   h2 {
-    margin: 0 0 12px;
+    margin: 0 0 var(--s4);
     font-size: 18px;
   }
   .cols {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
-    gap: 18px 32px;
+    gap: var(--s5) var(--s6);
   }
   h3 {
-    margin: 0 0 6px;
+    margin: 0 0 var(--s2);
     font-size: 12px;
     font-weight: 600;
     text-transform: uppercase;
@@ -111,14 +126,26 @@
     font-size: 13.5px;
   }
   .key {
+    flex: none;
     width: 120px;
     color: var(--muted);
   }
+  .foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s4);
+    margin-top: var(--s5);
+    padding-top: var(--s4);
+    border-top: 1px solid var(--line);
+  }
   .vim {
     display: flex;
-    gap: 8px;
+    gap: var(--s2);
     align-items: center;
-    margin-top: 18px;
     color: var(--muted);
+  }
+  .learn {
+    padding-left: var(--s2);
   }
 </style>

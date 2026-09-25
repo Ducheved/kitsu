@@ -54,8 +54,10 @@
 </script>
 
 <article class="page">
-  <h1>{t("rules.title")}</h1>
-  <p class="lede">{t("rules.lede")}</p>
+  <header data-tour="rules">
+    <h1>{t("rules.title")}</h1>
+    <p class="lede">{t("rules.lede")}</p>
+  </header>
   {#if error}<p class="tone-bad">{error}</p>{/if}
 
   {#if rules}
@@ -150,12 +152,12 @@
 
 <style>
   .page {
-    max-width: 820px;
+    max-width: 840px;
     margin: 0 auto;
-    padding: 34px 40px 80px;
+    padding: var(--s7) var(--s7) var(--s8);
   }
   h1 {
-    margin: 0 0 6px;
+    margin: 0 0 var(--s2);
     font-size: 26px;
     font-weight: 650;
   }
@@ -163,17 +165,18 @@
     margin: 0;
     color: var(--muted);
     max-width: 64ch;
+    line-height: 1.65;
   }
   .item {
-    padding: 14px 0;
+    padding: var(--s4) 0 var(--s4);
     border-bottom: 1px solid var(--line);
   }
   .item-head {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 8px;
-    margin-bottom: 4px;
+    gap: var(--s2);
+    margin-bottom: var(--s2);
   }
   .item-title {
     font-weight: 600;
@@ -183,6 +186,9 @@
     font-size: 13.5px;
     color: var(--muted);
   }
+  .item > .hint {
+    margin-top: var(--s1);
+  }
   .rejected {
     margin: 4px 0 0;
     padding: 0;
@@ -190,7 +196,7 @@
     font-size: 13px;
   }
   .rejected li {
-    padding: 2px 0;
+    padding: 3px 0;
     color: var(--muted);
   }
   .no {
@@ -203,8 +209,8 @@
   }
   .answer-row {
     display: flex;
-    gap: 8px;
-    margin: 6px 0;
+    gap: var(--s2);
+    margin: var(--s2) 0;
   }
   .checks-title {
     display: flex;
@@ -214,8 +220,8 @@
   .check {
     display: flex;
     align-items: center;
-    gap: 14px;
-    padding: 8px 0;
+    gap: var(--s4);
+    padding: var(--s3) 0;
     border-bottom: 1px solid var(--line);
   }
   .name {

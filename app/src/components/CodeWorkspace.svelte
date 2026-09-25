@@ -5,6 +5,7 @@
   import { buffers } from "../lib/buffers.svelte";
   import { highlightExt, highlightSlot, setExTarget, vimExt, vimSlot } from "../lib/editor";
   import { t } from "../lib/i18n/index.svelte";
+  import Fox from "./Fox.svelte";
 
   let { path }: { path?: string } = $props();
 
@@ -101,6 +102,7 @@
   ></div>
   {#if !buffers.current}
     <div class="empty">
+      <Fox state="idle" size={48} />
       <p>{t("editor.noFiles")}</p>
       <p class="hint">{t("editor.noFilesHint", { key: "⌘P" })}</p>
     </div>
@@ -133,6 +135,9 @@
     height: 28px;
     border-radius: 7px;
     color: var(--muted);
+    transition:
+      background-color var(--fast) var(--ease),
+      color var(--fast) var(--ease);
   }
   .tab.on {
     background: var(--bg);
@@ -182,10 +187,15 @@
     inset: 36px 0 0;
     display: grid;
     place-content: center;
+    justify-items: center;
+    gap: var(--s1);
     text-align: center;
     color: var(--muted);
   }
   .empty p {
     margin: 2px;
+  }
+  .empty :global(.fox) {
+    margin-bottom: var(--s3);
   }
 </style>

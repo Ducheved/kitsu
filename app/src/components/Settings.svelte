@@ -61,12 +61,14 @@
     display: grid;
     place-items: center;
     background: var(--overlay);
+    animation: fade-in var(--fast) var(--ease);
   }
   .sheet {
     width: min(620px, 94vw);
     max-height: 90vh;
     overflow: auto;
-    padding: 24px 28px;
+    padding: var(--s5) var(--s6);
+    animation: pop-in var(--quick) var(--ease);
     border-radius: 16px;
     background: var(--elev);
     box-shadow: var(--shadow);
@@ -91,9 +93,21 @@
   }
   .choices button {
     height: 30px;
-    padding: 0 12px;
+    padding: 0 var(--s3);
     border-radius: 15px;
     border: 1px solid var(--line);
+  }
+  .choices button,
+  .layout {
+    transition:
+      background-color var(--fast) var(--ease),
+      border-color var(--fast) var(--ease),
+      color var(--fast) var(--ease),
+      transform var(--fast) var(--ease);
+  }
+  .choices button:active,
+  .layout:active {
+    transform: scale(0.98);
   }
   .choices button:hover,
   .layout:hover {

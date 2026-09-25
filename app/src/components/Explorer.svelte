@@ -210,6 +210,7 @@
     text-align: left;
     font-size: 13px;
     white-space: nowrap;
+    transition: background-color var(--fast) var(--ease);
   }
   .row:hover {
     background: var(--hover);

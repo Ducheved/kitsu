@@ -5,6 +5,7 @@
   import { inline, render } from "../lib/md";
   import { estimateTokens, runWord, statusText, tokenParams } from "../lib/status";
   import type { Ask, Run, TaskDetail } from "../lib/types";
+  import Fox from "./Fox.svelte";
   import Glyph from "./Glyph.svelte";
   import ReviewCard from "./ReviewCard.svelte";
   import RunActivity from "./RunActivity.svelte";
@@ -151,8 +152,11 @@
         {#if statusRun}<div class="card"><RunActivity runId={statusRun.id} live compact /></div>{/if}
       {:else if status?.kind === "running"}
         <div class="card">
-          <div class="card-head">
-            <span class="pill work">{status.stopping ? t("run.stopping") : t("run.working")}</span>
+          <div class="card-head run-head">
+            <span class="working">
+              <Fox state={status.stopping ? "idle" : "working"} size={32} />
+              <span class="pill work">{status.stopping ? t("run.stopping") : t("run.working")}</span>
+            </span>
             <button class="btn" onclick={stop} disabled={status.stopping}>{t("run.stop")} <kbd>s</kbd></button>
           </div>
           <RunActivity runId={status.run} live />
@@ -207,7 +211,7 @@
           <div class="agents" role="radiogroup" aria-label="Agent">
             {#each agents as a (a.name)}
               <button
-                class="agent"
+                class="agent press"
                 class:on={app.prefs.agent === a.name}
                 role="radio"
                 aria-checked={app.prefs.agent === a.name}
@@ -274,7 +278,7 @@
       <div class="history">
         {#each history as r (r.id)}
           <div class="attempt">
-            <button class="attempt-head" onclick={() => (openRun = openRun === r.id ? null : r.id)}>
+            <button class="attempt-head press" onclick={() => (openRun = openRun === r.id ? null : r.id)}>
               <span class="mono">{r.id}</span>
               <span>{r.agent}</span>
               <span class="pill {r.resolution === 'accepted' ? 'ok' : r.state === 'failed' ? 'bad' : 'dim'}">{runWord(r.state, r.stop_reason, r.resolution)}</span>
@@ -298,15 +302,15 @@
     letter-spacing: 0;
   }
   .page {
-    max-width: 820px;
+    max-width: 840px;
     margin: 0 auto;
-    padding: 34px 40px 80px;
+    padding: var(--s7) var(--s7) var(--s8);
   }
   .crumb {
-    margin-bottom: 6px;
+    margin-bottom: var(--s2);
   }
   h1 {
-    margin: 0 0 8px;
+    margin: 0 0 var(--s2);
     font-size: 26px;
     line-height: 1.25;
     font-weight: 650;
@@ -315,28 +319,33 @@
   .status {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--s2);
     color: var(--muted);
   }
   .action {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    margin-top: 22px;
+    gap: var(--s4);
+    margin-top: var(--s5);
   }
   .card-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
-    margin-bottom: 10px;
+    gap: var(--s2);
+    margin-bottom: var(--s3);
+  }
+  .working {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
   }
   .row {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 10px;
-    margin-top: 10px;
+    gap: var(--s3);
+    margin-top: var(--s3);
   }
   .spacer {
     flex: 1;
@@ -346,7 +355,7 @@
     box-shadow: 0 0 0 3px var(--warn-soft);
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--s2);
   }
   .ask-q {
     font-size: 15px;
@@ -354,16 +363,16 @@
   .start {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: var(--s4);
   }
   .agents {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: var(--s2);
   }
   .agent {
     height: 28px;
-    padding: 0 12px;
+    padding: 0 var(--s3);
     border-radius: 14px;
     border: 1px solid var(--line);
     font-size: 13px;
@@ -380,7 +389,7 @@
   .policy {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--s2);
     color: var(--muted);
     font-size: 13px;
   }
@@ -417,11 +426,14 @@
   }
   .c-row {
     display: flex;
-    gap: 14px;
-    padding: 7px 0;
+    gap: var(--s4);
+    padding: var(--s3) 0;
     border-bottom: 1px solid var(--line);
     text-align: left;
     font-size: 13.5px;
+  }
+  .c-title {
+    transition: color var(--fast) var(--ease);
   }
   .link-row:hover .c-title {
     color: var(--accent);
@@ -429,6 +441,8 @@
   .c-text {
     display: flex;
     flex-direction: column;
+    gap: 2px;
+    max-width: var(--measure);
   }
   .c-title {
     font-weight: 500;
@@ -438,29 +452,31 @@
   }
   .c-kind {
     flex: none;
-    width: 92px;
+    width: 104px;
     color: var(--faint);
     font-size: 12.5px;
   }
   .show-brief {
     align-self: flex-start;
-    margin-top: 8px;
-    height: 26px;
-    padding: 0 8px;
+    margin-top: var(--s3);
+    margin-left: calc(-1 * var(--s2));
+    height: 28px;
+    padding: 0 var(--s2);
     font-size: 12.5px;
   }
   .brief {
     max-height: 420px;
-    margin: 8px 0 0;
-    padding: 14px 16px;
+    margin: var(--s2) 0 0;
+    padding: var(--s4);
     border-radius: 10px;
     background: var(--rail);
     white-space: pre-wrap;
+    animation: enter var(--quick) var(--ease);
   }
   .history {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--s2);
   }
   .attempt {
     border: 1px solid var(--line);
@@ -468,18 +484,23 @@
     overflow: hidden;
   }
   .attempt-head {
+    --press: 0.99;
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: var(--s3);
     width: 100%;
-    padding: 8px 12px;
+    padding: var(--s3) var(--s4);
     text-align: left;
     font-size: 13px;
+  }
+  .attempt-head:focus-visible {
+    outline-offset: -2px;
   }
   .attempt-head:hover {
     background: var(--hover);
   }
   .attempt-body {
-    padding: 4px 12px 12px;
+    padding: var(--s1) var(--s4) var(--s4);
+    animation: enter var(--quick) var(--ease);
   }
 </style>

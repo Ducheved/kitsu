@@ -6,6 +6,7 @@
   import { t } from "../lib/i18n/index.svelte";
   import { inline } from "../lib/md";
   import { statusText } from "../lib/status";
+  import Fox from "./Fox.svelte";
   import Glyph from "./Glyph.svelte";
 
   const tasks = $derived((app.overview?.tasks ?? []).filter((x) => x.attention === "needs_you" || x.attention === "working"));
@@ -21,13 +22,13 @@
   }
 </script>
 
-<aside class="strip">
+<aside class="strip" data-tour="strip">
   <header><span class="title">{t("strip.title")}</span></header>
   <div class="list scroll">
-    {#each tasks as task (task.id)}
+    {#each tasks as task, i (task.id)}
       {@const ask = "run" in task.status ? asks.find((a) => a.run === (task.status as { run: string }).run) : undefined}
-      <div class="item" class:asking={!!ask}>
-        <button class="head" onclick={() => app.openTask(task.id)}>
+      <div class="item enter" style:--i={i} class:asking={!!ask}>
+        <button class="head press" onclick={() => app.openTask(task.id)}>
           <Glyph attention={task.attention} status={task.status} />
           <span class="text">
             <span class="t">{task.title}</span>
@@ -46,7 +47,7 @@
         {/if}
       </div>
     {:else}
-      <div class="quiet hint">{t("strip.quiet")}</div>
+      <div class="quiet hint"><Fox state="sleeping" size={32} />{t("strip.quiet")}</div>
     {/each}
   </div>
 </aside>
@@ -60,7 +61,7 @@
     border-left: 1px solid var(--line);
   }
   header {
-    padding: 14px 14px 8px;
+    padding: var(--s4) var(--s4) var(--s2);
   }
   .title {
     font-size: 11.5px;
@@ -72,10 +73,10 @@
   .list {
     flex: 1;
     min-height: 0;
-    padding: 0 8px 12px;
+    padding: 0 var(--s2) var(--s3);
   }
   .item {
-    margin-bottom: 4px;
+    margin-bottom: var(--s1);
     border-radius: 10px;
   }
   .item.asking {
@@ -131,6 +132,10 @@
     font-size: 12.5px;
   }
   .quiet {
-    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--s2);
+    padding: var(--s2) 10px;
   }
 </style>

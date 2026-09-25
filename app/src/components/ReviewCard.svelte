@@ -47,7 +47,10 @@
     busy = "accept";
     try {
       result = await api.accept(run.id, closeTask, approved ? (review.approval_token ?? undefined) : undefined);
-      if (result.result === "applied") app.notify(closeTask ? t("review.acceptedClosed") : t("review.accepted"), "ok");
+      if (result.result === "applied") {
+        app.accepted++;
+        app.notify(closeTask ? t("review.acceptedClosed") : t("review.accepted"), "ok", true);
+      }
     } catch (e) {
       app.notify(errorText(e), "bad");
     } finally {
@@ -87,7 +90,7 @@
   }
 </script>
 
-<div class="card review">
+<div class="card review" data-tour="review">
   <div class="head">
     <div>
       <div class="title">
@@ -116,7 +119,7 @@
   {#if review && !empty}
     <div class="files">
       {#each review.files as f (f.path)}
-        <button class="file" onclick={() => app.go({ kind: "diff", run: run.id, path: f.path })}>
+        <button class="file press" onclick={() => app.go({ kind: "diff", run: run.id, path: f.path })}>
           <span class="mono path">{f.path}</span>
           {#if review.protected.includes(f.path)}<span class="pill warn">{isNote(f.path) ? t("review.note") : t("review.protected")}</span>{/if}
           <span class="n mono">{#if f.added === null}{t("review.binary")}{:else}<span class="tone-ok">+{f.added}</span> <span class="tone-bad">−{f.removed}</span>{/if}</span>
@@ -126,9 +129,14 @@
 
     {#if review.checks.length}
       <div class="checks">
-        {#each review.checks as [name, s] (name)}
+        {#each review.checks as [name, s], i (name)}
           {@const w = checkWord(s)}
-          <div class="check"><span class="mono">{name}</span><span class="pill {w.tone}">{w.word}</span>{#if w.hint}<span class="hint">{w.hint}</span>{/if}</div>
+          <div class="check">
+            <span class="mono">{name}</span>
+            <!-- Re-keyed on the word, so a result arriving (not run → passes) settles in visibly. -->
+            {#key w.word}<span class="pill {w.tone} settle" style:--i={i}>{w.word}</span>{/key}
+            {#if w.hint}<span class="hint">{w.hint}</span>{/if}
+          </div>
         {/each}
       </div>
     {/if}
@@ -162,7 +170,7 @@
       </div>
     </div>
   {:else}
-    <div class="actions">
+    <div class="actions" data-tour="review-actions">
       {#if !empty}
         <button class="btn primary" disabled={!review || busy !== "" || needsApproval} onclick={() => accept(true)}>{t("review.acceptClose")} <kbd>a</kbd></button>
         <button class="btn" disabled={!review || busy !== "" || needsApproval} onclick={() => accept(false)}>{t("review.acceptKeep")}</button>
@@ -178,21 +186,22 @@
   .review {
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: var(--s5);
   }
   .head {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
-    gap: 12px;
+    gap: var(--s3);
   }
   .title {
     font-weight: 600;
     font-size: 15px;
   }
   .verdict {
-    margin-top: 2px;
-    font-size: 13px;
+    margin-top: var(--s1);
+    font-size: 13.5px;
+    animation: fade-in var(--quick) var(--ease);
   }
   .files {
     display: flex;
@@ -202,12 +211,16 @@
     overflow: hidden;
   }
   .file {
+    --press: 0.995;
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 8px 12px;
+    gap: var(--s3);
+    padding: 10px var(--s4);
     text-align: left;
     border-bottom: 1px solid var(--line);
+  }
+  .file:focus-visible {
+    outline-offset: -2px;
   }
   .file:last-child {
     border-bottom: none;
@@ -227,22 +240,35 @@
   .checks {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--s2);
   }
   .check {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: var(--s3);
     font-size: 13px;
   }
   .check .mono {
-    min-width: 110px;
+    min-width: 120px;
+  }
+  /* The pill starts as a neutral chip and takes on its result's tone. */
+  .settle {
+    animation: settle 280ms var(--ease) backwards;
+    animation-delay: calc(var(--i, 0) * 70ms);
+  }
+  @keyframes settle {
+    from {
+      opacity: 0.4;
+      transform: scale(0.9);
+      background-color: var(--hover);
+      color: var(--muted);
+    }
   }
   .approve {
     display: flex;
-    gap: 10px;
+    gap: var(--s3);
     align-items: flex-start;
-    padding: 10px 12px;
+    padding: var(--s3) var(--s4);
     border-radius: 10px;
     background: var(--warn-soft);
     font-size: 13px;
@@ -251,17 +277,25 @@
     margin-top: 3px;
   }
   .outcome {
-    padding: 10px 12px;
+    padding: var(--s3) var(--s4);
     border-radius: 10px;
     background: var(--rail);
     font-size: 13px;
+    animation: enter var(--quick) var(--ease);
   }
   .actions,
   .row {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 8px;
+    gap: var(--s2);
+  }
+  .actions {
+    padding-top: var(--s1);
+  }
+  /* Keeps Discard at the right edge even when a narrow window wraps the row. */
+  .actions > .danger {
+    margin-left: auto;
   }
   .spacer {
     flex: 1;
@@ -269,10 +303,12 @@
   .continue {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--s2);
+    animation: enter var(--quick) var(--ease);
   }
   .activity {
-    padding: 12px;
+    animation: enter var(--quick) var(--ease);
+    padding: var(--s4);
     border-radius: 10px;
     background: var(--bg);
     border: 1px solid var(--line);

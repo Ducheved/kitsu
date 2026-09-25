@@ -9,7 +9,7 @@
 </script>
 
 <footer class="bar">
-  <div class="modes" role="radiogroup" aria-label={t("settings.layout")}>
+  <div class="modes" role="radiogroup" aria-label={t("settings.layout")} data-tour="modes">
     <button role="radio" aria-checked={app.mode === "work"} class:on={app.mode === "work"} onclick={() => app.setMode("work")} title="⌘1">{t("layout.work")}</button>
     <button role="radio" aria-checked={app.mode === "code"} class:on={app.mode === "code"} onclick={() => app.setMode("code")} title="⌘2">{t("layout.code")}</button>
   </div>
@@ -29,9 +29,9 @@
   .bar {
     display: flex;
     align-items: center;
-    gap: 14px;
-    height: 26px;
-    padding: 0 10px;
+    gap: var(--s4);
+    height: 32px;
+    padding: 0 var(--s3);
     border-top: 1px solid var(--line);
     background: var(--rail);
     font-size: 12px;
@@ -47,10 +47,17 @@
     background: var(--hover);
   }
   .modes button {
-    height: 18px;
-    padding: 0 8px;
+    height: 22px;
+    padding: 0 10px;
     border-radius: 5px;
     font-size: 11.5px;
+    transition:
+      background-color var(--fast) var(--ease),
+      color var(--fast) var(--ease),
+      box-shadow var(--fast) var(--ease);
+  }
+  .modes button:hover:not(.on) {
+    color: var(--text);
   }
   .modes button.on {
     background: var(--elev);
@@ -59,6 +66,9 @@
   }
   .item {
     font-size: 12px;
+  }
+  button.item {
+    transition: color var(--fast) var(--ease);
   }
   button.item:hover {
     color: var(--text);
