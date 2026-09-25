@@ -86,7 +86,10 @@ pub enum Policy {
     /// commands, network, paths outside the worktree) waits for a human.
     Ask,
     /// Everything inside the worktree is allowed, including commands.
-    /// Anything touching paths outside it still waits for a human.
+    /// Anything touching paths outside it still waits for a human, and in
+    /// Kitsu's own loop so do commands that reach the network, change the
+    /// refs every worktree shares, install packages or raise privileges
+    /// (decision `auto-still-asks`). Not a sandbox.
     Auto,
     /// Ask, except that Kitsu's own loop may let a shell command through
     /// when the configured judge (`[judge]` in agents.toml) says it's

@@ -198,6 +198,11 @@ The loop is a brain (model calls) and a host (tools, journal, checks) that
 talk only in JSON-RPC, so the brain can later run elsewhere while your
 machine keeps the hands.
 
+`--policy auto` lets the agent run commands in its worktree without asking,
+except that commands reaching the network, changing the refs every worktree
+shares (`git push`, `update-ref`, `branch -D`, ...), installing packages or
+raising privileges still wait for you. It is not a sandbox.
+
 `--policy triage` (experimental) is `ask`, except that a shell command
 TypeSafe's System One rates low-risk and confined to the worktree, at or
 above a threshold, runs without asking you. It's off until configured:
