@@ -1905,3 +1905,38 @@ fn openai_responses_overflow_compacts_once_then_stops() {
     let after = overflows(RESPONSES, "or-over");
     assert_responses_pairs(&after);
 }
+
+/// A held-out check tells the model pass or fail and nothing else: its
+/// output never reaches a request, from run_check or from a refused finish.
+#[test]
+fn a_held_out_checks_output_never_reaches_the_model() {
+    let script = json!([
+        { "tool": "write_file", "args": { "path": "payments.py", "content": good_payments() } },
+        { "tool": "run_check", "args": { "name": "secret" } },
+        { "tool": "finish", "args": { "outcome": "done", "summary": "done" }, "expect": "held out", "reject": "SECRET-OUTPUT" },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "can't see why" }, "expect": "`secret`", "reject": "SECRET-OUTPUT" },
+    ]);
+    let env = Env::new("held-out", &script, "");
+    let toml = env.repo.join(".kitsu/kitsu.toml");
+    let mut t = std::fs::read_to_string(&toml).expect("kitsu.toml");
+    t.push_str(
+        "\n[checks.secret]\nrun = \"sh \\\"$KITSU_HELD_OUT/check.sh\\\"\"\nguards = [\"payments.py\"]\nheld_out = true\n",
+    );
+    std::fs::write(&toml, t).expect("write kitsu.toml");
+    git(&env.repo, &["commit", "-qam", "held-out check"]);
+    let held = env.cfg.join("held-out/repo/secret");
+    std::fs::create_dir_all(&held).expect("held dir");
+    std::fs::write(held.join("check.sh"), "echo SECRET-OUTPUT\nexit 1\n").expect("check.sh");
+
+    let o = env.run("rho", &[]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        stop_reason(&env, "rho"),
+        (RunState::Finished, Some("blocked".into()))
+    );
+    let log = std::fs::read_to_string(&env.log).expect("request log");
+    assert!(
+        !log.contains("SECRET-OUTPUT"),
+        "held-out output reached the model"
+    );
+}

@@ -28,6 +28,7 @@ A script is a JSON list, one entry per model request, played in order:
   {"status": 429, "retry_after": 0}                         an HTTP error (429, 529, 500, 401...)
   {"stream_error": true}                                    a 200 whose stream fails (Messages: overloaded_error, Responses: response.failed)
   {"expect": "substring"}  (on any entry) the request must contain it, or 500
+  {"reject": "substring"}  (on any entry) the request must NOT contain it, or 500
 Chat Completions only:
   {"raw_tools": [{"tool": ..., "arguments": "<verbatim>", "id": null, "index": N}]}
                                                             calls sent as given (arguments
@@ -114,6 +115,8 @@ def scripted(text):
     e = SCRIPT[i]
     if "expect" in e and e["expect"] not in text:
         return ("error", f"script step {i}: request does not contain {e['expect']!r}")
+    if "reject" in e and e["reject"] in text:
+        return ("error", f"script step {i}: request contains {e['reject']!r}")
     usage = e.get("usage", {})
     if e.get("overflow"):
         return ("overflow",)

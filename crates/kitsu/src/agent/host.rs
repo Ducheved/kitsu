@@ -771,7 +771,7 @@ impl<'a> Host<'a> {
                     ev.outcome.as_str(),
                     ev.id,
                     &ev.tree[..ev.tree.len().min(12)],
-                    self.log_tail(ev.log.as_deref(), 8 * 1024)
+                    self.check_log(def, ev.log.as_deref(), 8 * 1024)
                 ))
             }
             "update_plan" => {
@@ -795,6 +795,15 @@ impl<'a> Host<'a> {
             }
             other => Err(Invalid(format!("unknown tool `{other}`"))),
         }
+    }
+
+    /// What the model may see of a check's output: none of a held-out
+    /// check's, only that it passed or failed.
+    fn check_log(&self, def: &crate::intent::CheckDef, log: Option<&str>, max: usize) -> String {
+        if def.held_out {
+            return "(a held-out check: its output is not shown)\n".into();
+        }
+        self.log_tail(log, max)
     }
 
     fn log_tail(&self, log: Option<&str>, max: usize) -> String {
@@ -890,7 +899,7 @@ impl<'a> Host<'a> {
                             ev.outcome.as_str(),
                             ev.id,
                             r.why.join(", "),
-                            self.log_tail(ev.log.as_deref(), 2048)
+                            self.check_log(def, ev.log.as_deref(), 2048)
                         ));
                     }
                 }
