@@ -1,6 +1,6 @@
 +++
 title = "Commands run under sh on every platform, Git for Windows' sh on Windows"
-state = "proposed"
+state = "accepted"
 scope = ["crates/kitsu/src/proc.rs", "crates/kitsu/src/check.rs", "crates/kitsu/src/agent/host.rs"]
 rejected = [
   "`cmd /C` on Windows: checks are written in POSIX shell, and cmd reads some of them as something that passes (`echo ok; exit 1` is one echo that exits 0). A check that can pass without running what it says is worse than one that can't run",
