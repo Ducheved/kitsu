@@ -40,6 +40,9 @@ pub struct Step {
     /// What Kitsu answered to a reply with no tool calls (which it takes as
     /// `finish`). Rendered as a user message after the step.
     pub notice: Option<String>,
+    /// Opaque provider state for this reply (`provider::Reply::replay`),
+    /// carried through for the provider that wrote it.
+    pub replay: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -112,6 +115,7 @@ pub fn fold(entries: &[Value]) -> Conversation {
                     text: body["text"].as_str().map(str::to_string),
                     calls,
                     notice: None,
+                    replay: body.get("replay").filter(|r| !r.is_null()).cloned(),
                 });
             }
             "tool.end" => {
@@ -191,6 +195,7 @@ pub fn render(prefix: &Prefix, conv: &Conversation, ledger: &str) -> Vec<Msg> {
                     },
                 })
                 .collect(),
+            replay: s.replay.clone(),
         });
         for c in &s.calls {
             let text = match (&c.elided, &c.result) {
@@ -243,7 +248,7 @@ pub fn estimate(msgs: &[Msg], extra: usize) -> u64 {
 fn msg_bytes(m: &Msg) -> usize {
     match m {
         Msg::System(t) | Msg::User(t) => t.len() + 8,
-        Msg::Assistant { text, calls } => {
+        Msg::Assistant { text, calls, .. } => {
             text.as_ref().map_or(0, |t| t.len())
                 + calls
                     .iter()
@@ -593,6 +598,22 @@ mod tests {
         // A target nothing can reach: it does what it can and says so.
         let hard = compact(&p, &conv, "L", 0, 10, 1100);
         assert!(hard.after > 10 && hard.after < hard.before);
+    }
+
+    #[test]
+    fn provider_state_rides_with_its_step_untouched() {
+        let replay = json!({ "provider": "openai-responses", "items": [{ "type": "reasoning", "encrypted_content": "e" }] });
+        let mut entries = journal();
+        entries[0]["body"]["replay"] = replay.clone();
+        let c = fold(&entries);
+        assert_eq!(c.steps[0].replay.as_ref(), Some(&replay));
+        assert_eq!(c.steps[1].replay, None);
+        let p = Prefix {
+            harness: "H".into(),
+            brief: "B".into(),
+        };
+        let msgs = render(&p, &c, "L");
+        assert!(matches!(&msgs[3], Msg::Assistant { replay: Some(r), .. } if *r == replay));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use super::context::{self, Call, Prefix, Step};
 use super::protocol::{self, HostLink};
-use super::provider::{OpenAiChat, ProviderError};
+use super::provider::{Provider, ProviderError};
 use crate::util::content_id;
 
 /// Attempts per model request for errors worth retrying.
@@ -25,7 +25,7 @@ pub enum End {
     Failed(String),
 }
 
-pub async fn run(link: &HostLink, provider: &OpenAiChat, cancel: watch::Receiver<bool>) -> End {
+pub async fn run(link: &HostLink, provider: &Provider, cancel: watch::Receiver<bool>) -> End {
     match drive(link, provider, cancel).await {
         Ok(e) => e,
         Err(e) => End::Failed(e),
@@ -34,7 +34,7 @@ pub async fn run(link: &HostLink, provider: &OpenAiChat, cancel: watch::Receiver
 
 async fn drive(
     link: &HostLink,
-    provider: &OpenAiChat,
+    provider: &Provider,
     mut cancel: watch::Receiver<bool>,
 ) -> Result<End, String> {
     let session = link.call(protocol::SESSION, json!({})).await?;
@@ -208,19 +208,18 @@ async fn drive(
         tokens += used;
         last_prompt = reply.usage.prompt;
         overflowed = false;
-        append(
-            link,
-            "model.response",
-            json!({
-                "turn": turn,
-                "text": reply.text,
-                "calls": calls.iter().map(|c| json!({ "call": c.id, "provider_id": c.provider_id, "name": c.name, "arguments": c.arguments })).collect::<Vec<_>>(),
-                "finish": reply.finish,
-                "usage": { "prompt": reply.usage.prompt, "completion": reply.usage.completion, "cached": reply.usage.cached, "cost": reply.usage.cost },
-                "request_sha": request_sha,
-            }),
-        )
-        .await?;
+        let mut response = json!({
+            "turn": turn,
+            "text": reply.text,
+            "calls": calls.iter().map(|c| json!({ "call": c.id, "provider_id": c.provider_id, "name": c.name, "arguments": c.arguments })).collect::<Vec<_>>(),
+            "finish": reply.finish,
+            "usage": { "prompt": reply.usage.prompt, "completion": reply.usage.completion, "cached": reply.usage.cached, "cache_write": reply.usage.cache_write, "cost": reply.usage.cost },
+            "request_sha": request_sha,
+        });
+        if let Some(r) = &reply.replay {
+            response["replay"] = r.clone();
+        }
+        append(link, "model.response", response).await?;
         conv.calls_issued += calls.len() as u64;
         let no_calls = calls.is_empty();
         conv.steps.push(Step {
@@ -228,6 +227,7 @@ async fn drive(
             text: reply.text.clone(),
             calls,
             notice: None,
+            replay: reply.replay,
         });
 
         // A reply with nothing to do is the model saying it's done. That is a
@@ -306,7 +306,7 @@ async fn stop(link: &HostLink, reason: &str) -> End {
 /// with a bounded number of attempts. Each failed attempt is journaled.
 async fn request(
     link: &HostLink,
-    provider: &OpenAiChat,
+    provider: &Provider,
     body: &Value,
     turn: u64,
     cancel: &mut watch::Receiver<bool>,

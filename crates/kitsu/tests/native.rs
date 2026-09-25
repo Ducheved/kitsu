@@ -1,6 +1,8 @@
 //! Kitsu's own agent loop, end to end: `kitsu run --agent kitsu` against
-//! the scripted model server (fixtures/stub-model/server.py, OpenAI mode),
-//! on a copy of fixtures/retry-storm. No model, no key, no network.
+//! the scripted model server (fixtures/stub-model/server.py: Chat
+//! Completions, and at the end of this file Anthropic Messages and OpenAI
+//! Responses), on a copy of fixtures/retry-storm. No model, no key, no
+//! network.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -71,6 +73,11 @@ impl Env {
     /// A repo, a config dir whose agents.toml points `kitsu` at a stub model
     /// that plays `script`.
     fn new(name: &str, script: &Value, native_extra: &str) -> Env {
+        Env::with_provider(name, script, native_extra, "openai-chat")
+    }
+
+    /// Same, speaking `provider`'s wire format.
+    fn with_provider(name: &str, script: &Value, native_extra: &str, provider: &str) -> Env {
         let root = std::env::temp_dir().join(format!("kitsu-native-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let repo = root.join("repo");
@@ -107,10 +114,22 @@ impl Env {
             .next()
             .and_then(|p| p.parse().ok())
             .expect("port line");
+        // Each format's base URL convention: Anthropic's has no version.
+        let (base, provider) = match provider {
+            "openai-chat" => (format!("http://127.0.0.1:{port}/v1"), String::new()),
+            "anthropic-messages" => (
+                format!("http://127.0.0.1:{port}"),
+                format!("provider = \"{provider}\", "),
+            ),
+            _ => (
+                format!("http://127.0.0.1:{port}/v1"),
+                format!("provider = \"{provider}\", "),
+            ),
+        };
         std::fs::write(
             cfg.join("agents.toml"),
             format!(
-                "[limits]\nnice = 0\ncpus = 0\n\n[agents.kitsu]\nnative = {{ base_url = \"http://127.0.0.1:{port}/v1\", model = \"stub\", api_key_env = \"KITSU_TEST_KEY\"{native_extra} }}\n"
+                "[limits]\nnice = 0\ncpus = 0\n\n[agents.kitsu]\nnative = {{ {provider}base_url = \"{base}\", model = \"stub\", api_key_env = \"KITSU_TEST_KEY\"{native_extra} }}\n"
             ),
         )
         .expect("agents.toml");
@@ -895,4 +914,417 @@ fn paths_outside_the_worktree_are_refused_symlinks_included() {
     assert_eq!(ends[3]["outcome"], "invalid");
     assert!(!env.repo.join(".git/kitsu/worktrees/escape.txt").exists());
     assert!(!Path::new("/tmp/kitsu-escape.txt").exists());
+}
+
+// Anthropic Messages and OpenAI Responses: the same loop, rendered in
+// another wire format. The conversation, the journal and resume are the
+// same; what differs is checked here.
+
+const ANTHROPIC: &str = "anthropic-messages";
+const RESPONSES: &str = "openai-responses";
+
+/// The happy path, with cache usage on every reply.
+fn verified_run(provider: &str, name: &str) -> Env {
+    let u = json!({ "input": 100, "cached": 900, "cache_write": 50 });
+    let script = json!([
+        { "tool": "read_file", "args": { "path": "payments.py" }, "expect": "Done means", "usage": u },
+        { "tool": "write_file", "args": { "path": "payments.py", "content": good_payments() }, "usage": u },
+        { "tool": "run_check", "args": { "name": "retries" }, "usage": u },
+        { "tool": "run_check", "args": { "name": "idempotency" }, "expect": "Check `retries`: pass", "usage": u },
+        { "tool": "finish", "args": { "outcome": "done", "summary": "Bounded to 3, one key per charge." }, "expect": "idempotency", "usage": u },
+    ]);
+    let env = Env::with_provider(name, &script, "", provider);
+    let o = env.run("rp1", &[]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        stop_reason(&env, "rp1"),
+        (RunState::Finished, Some("verified".into()))
+    );
+    assert_eq!(env.requests().len(), 5);
+    let status = env.ok(&["status"]);
+    assert!(status.contains("ready for review, checks pass"), "{status}");
+    env.assert_key_never_written();
+    env
+}
+
+fn usage_of(env: &Env, run: &str) -> Vec<Value> {
+    env.events(run)
+        .into_iter()
+        .filter(|(k, _)| k == "model.response")
+        .map(|(_, b)| b["usage"].clone())
+        .collect()
+}
+
+fn blocks(msg: &Value) -> Vec<&Value> {
+    msg["content"].as_array().into_iter().flatten().collect()
+}
+
+/// Anthropic: turns alternate, and every tool_use is answered by a
+/// tool_result in the next turn.
+fn assert_anthropic_pairs(body: &Value) {
+    let msgs = body["messages"].as_array().expect("messages");
+    assert_eq!(msgs[0]["role"], "user");
+    for w in msgs.windows(2) {
+        assert_ne!(w[0]["role"], w[1]["role"], "turns alternate");
+        let asked: Vec<&Value> = blocks(&w[0])
+            .into_iter()
+            .filter(|b| b["type"] == "tool_use")
+            .map(|b| &b["id"])
+            .collect();
+        let answered: Vec<&Value> = blocks(&w[1])
+            .into_iter()
+            .filter(|b| b["type"] == "tool_result")
+            .map(|b| &b["tool_use_id"])
+            .collect();
+        assert_eq!(asked, answered);
+    }
+}
+
+/// Responses: every function_call has its output after it.
+fn assert_responses_pairs(body: &Value) {
+    let input = body["input"].as_array().expect("input");
+    for (i, item) in input.iter().enumerate() {
+        if item["type"] == "function_call" {
+            assert!(
+                input[i + 1..].iter().any(|o| o["type"] == "function_call_output"
+                    && o["call_id"] == item["call_id"]),
+                "{item} has no output"
+            );
+        }
+    }
+}
+
+#[test]
+fn anthropic_messages_verifies_a_run_and_marks_the_cache_but_never_the_ledger() {
+    let env = verified_run(ANTHROPIC, "am-happy");
+    let reqs = env.requests();
+    let first = &reqs[0]["body"];
+    assert!(
+        first["system"][0]["text"]
+            .as_str()
+            .expect("harness")
+            .starts_with("You are Kitsu's coding agent")
+    );
+    assert!(
+        first["system"][1]["text"]
+            .as_str()
+            .expect("brief")
+            .contains("## Done means")
+    );
+    let tools = first["tools"].as_array().expect("tools");
+    assert_eq!(tools.len(), 12);
+    assert!(tools.iter().all(|t| t["input_schema"]["type"] == "object"));
+    for r in &reqs {
+        assert_eq!(r["path"], "/v1/messages");
+        let b = &r["body"];
+        assert_eq!(
+            b["_headers"],
+            json!({ "authorization": "Bearer", "x-api-key": false, "anthropic-version": "2023-06-01" })
+        );
+        assert_eq!(b["system"], first["system"], "the same prefix bytes");
+        assert!(
+            b["system"]
+                .as_array()
+                .expect("system")
+                .iter()
+                .all(|s| s["cache_control"]["type"] == "ephemeral"),
+            "the harness and the brief are marked"
+        );
+        let all: Vec<&Value> = b["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .flat_map(blocks)
+            .collect();
+        let marks: Vec<usize> = (0..all.len())
+            .filter(|&i| all[i].get("cache_control").is_some())
+            .collect();
+        assert_eq!(
+            marks,
+            [all.len() - 2],
+            "one mark: the block before the ledger"
+        );
+        let ledger = all.last().expect("ledger");
+        assert!(
+            ledger["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("# Kitsu: state of your run")),
+            "the ledger is last: {ledger}"
+        );
+        assert_anthropic_pairs(b);
+    }
+    // Every input token counts, the cached part and the cache write too.
+    for u in usage_of(&env, "rp1") {
+        assert_eq!(
+            (&u["prompt"], &u["cached"], &u["cache_write"]),
+            (&json!(1050), &json!(900), &json!(50))
+        );
+    }
+}
+
+#[test]
+fn openai_responses_verifies_a_run_statelessly_and_sends_the_reasoning_back() {
+    let env = verified_run(RESPONSES, "or-happy");
+    let reqs = env.requests();
+    let first = &reqs[0]["body"]["input"];
+    assert_eq!(first[0]["role"], "system");
+    assert!(
+        first[0]["content"]
+            .as_str()
+            .expect("harness")
+            .starts_with("You are Kitsu's coding agent")
+    );
+    assert!(
+        first[1]["content"]
+            .as_str()
+            .expect("brief")
+            .contains("## Done means")
+    );
+    let tools = reqs[0]["body"]["tools"].as_array().expect("tools");
+    assert_eq!(tools.len(), 12);
+    assert!(
+        tools
+            .iter()
+            .all(|t| t["type"] == "function" && t["strict"] == false && t["name"].is_string())
+    );
+    for (k, r) in reqs.iter().enumerate() {
+        assert_eq!(r["path"], "/v1/responses");
+        let b = &r["body"];
+        assert_eq!(b["_headers"]["authorization"], "Bearer");
+        assert_eq!(
+            (&b["store"], &b["include"]),
+            (&json!(false), &json!(["reasoning.encrypted_content"]))
+        );
+        let input = b["input"].as_array().expect("input");
+        assert_eq!((&input[0], &input[1]), (&first[0], &first[1]));
+        // Each earlier reply's reasoning, in order, as the stub sent it.
+        let reasoning: Vec<&str> = input
+            .iter()
+            .filter(|i| i["type"] == "reasoning")
+            .filter_map(|i| i["encrypted_content"].as_str())
+            .collect();
+        let want: Vec<String> = (0..k).map(|n| format!("enc-{n}")).collect();
+        assert_eq!(reasoning, want);
+        let last = input.last().expect("ledger");
+        assert_eq!(last["role"], "user");
+        assert!(
+            last["content"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("# Kitsu: state of your run"))
+        );
+        assert_responses_pairs(b);
+    }
+    // The write's content went back as the call's arguments, from the
+    // journal's copy (the replay doesn't keep a second one).
+    let write = reqs[2]["body"]["input"]
+        .as_array()
+        .expect("input")
+        .iter()
+        .find(|i| i["type"] == "function_call" && i["name"] == "write_file")
+        .expect("the write");
+    assert!(
+        write["arguments"]
+            .as_str()
+            .expect("args")
+            .contains("MAX_ATTEMPTS")
+    );
+    let journaled = env
+        .events("rp1")
+        .into_iter()
+        .find(|(k, b)| k == "model.response" && b["turn"] == 2)
+        .expect("turn 2");
+    assert!(journaled.1["replay"]["items"][1].get("arguments").is_none());
+    for u in usage_of(&env, "rp1") {
+        assert_eq!((&u["prompt"], &u["cached"]), (&json!(1000), &json!(900)));
+    }
+}
+
+fn retried(provider: &str, name: &str, errors: Value) -> Vec<String> {
+    let mut script = errors.as_array().expect("errors").clone();
+    script.push(json!({ "tool": "finish", "args": { "outcome": "blocked", "summary": "ok" } }));
+    let env = Env::with_provider(name, &json!(script), "", provider);
+    assert!(env.run("rp2", &[]).status.success());
+    assert_eq!(
+        stop_reason(&env, "rp2"),
+        (RunState::Finished, Some("blocked".into()))
+    );
+    assert_eq!(env.requests().len(), script.len());
+    env.events("rp2")
+        .into_iter()
+        .filter(|(k, _)| k == "model.error")
+        .map(|(_, b)| {
+            format!(
+                "{} {}",
+                b["class"].as_str().unwrap_or(""),
+                b["detail"].as_str().unwrap_or("")
+            )
+        })
+        .collect()
+}
+
+fn bad_key_is_not_retried(provider: &str, name: &str) {
+    let env = Env::with_provider(
+        name,
+        &json!([{ "status": 401 }, { "text": "unreachable" }]),
+        "",
+        provider,
+    );
+    assert!(!env.run("rp3", &[]).status.success());
+    assert_eq!(env.store().run("rp3").expect("run").state, RunState::Failed);
+    assert_eq!(env.requests().len(), 1);
+}
+
+#[test]
+fn anthropic_messages_retries_overload_and_rate_limits_but_not_a_bad_key() {
+    let errors = retried(
+        ANTHROPIC,
+        "am-retry",
+        json!([{ "status": 529 }, { "status": 429, "retry_after": 0 }, { "stream_error": true }]),
+    );
+    assert_eq!(errors.len(), 3, "{errors:?}");
+    assert!(errors[0].starts_with("transient HTTP 529"), "{errors:?}");
+    assert!(errors[1].starts_with("rate_limited HTTP 429"), "{errors:?}");
+    assert!(
+        errors[2].starts_with("transient HTTP 529: Overloaded"),
+        "{errors:?}"
+    );
+    bad_key_is_not_retried(ANTHROPIC, "am-401");
+}
+
+#[test]
+fn openai_responses_retries_rate_limits_and_failed_responses_but_not_a_bad_key() {
+    let errors = retried(
+        RESPONSES,
+        "or-retry",
+        json!([{ "status": 429, "retry_after": 0 }, { "status": 500 }, { "stream_error": true }]),
+    );
+    assert_eq!(errors.len(), 3, "{errors:?}");
+    assert!(errors[0].starts_with("rate_limited HTTP 429"), "{errors:?}");
+    assert!(errors[1].starts_with("transient HTTP 500"), "{errors:?}");
+    assert!(
+        errors[2].starts_with("transient HTTP 500: The model failed"),
+        "{errors:?}"
+    );
+    bad_key_is_not_retried(RESPONSES, "or-401");
+}
+
+/// A crash right after an edit landed, then `--resume`: the edit is
+/// settled, not repeated, and the resumed request carries run a's call
+/// under the id the provider gave it. Returns (a's journaled reply, b's
+/// first request body).
+fn resumed(provider: &str, name: &str) -> (Value, Value) {
+    let old = "\"\"\"Charges a card through an upstream payment API.\"\"\"";
+    let script = json!([
+        { "tool": "edit_file", "args": { "path": "payments.py", "old": old, "new": format!("{old}\n# marker") } },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "stopping" }, "expect": "the change was applied. It was not repeated." },
+    ]);
+    let env = Env::with_provider(name, &script, "", provider);
+    let wt = crash_and_resume(&env, "after_effect:edit_file", &[]);
+    let text = std::fs::read_to_string(wt.join("payments.py")).expect("payments.py");
+    assert_eq!(text.matches("# marker").count(), 1, "applied exactly once");
+    assert_eq!(begins(&env, "ra/c1"), 1, "the effect never started twice");
+    assert_eq!(
+        stop_reason(&env, "rb"),
+        (RunState::Finished, Some("blocked".into()))
+    );
+    let reqs = env.requests();
+    assert_eq!(reqs.len(), 2);
+    let reply = env
+        .events("ra")
+        .into_iter()
+        .find(|(k, _)| k == "model.response")
+        .expect("a's reply")
+        .1;
+    (reply, reqs[1]["body"].clone())
+}
+
+#[test]
+fn anthropic_messages_resume_after_a_crash_settles_the_edit_and_continues_the_conversation() {
+    let (reply, body) = resumed(ANTHROPIC, "am-crash");
+    let id = reply["calls"][0]["provider_id"].as_str().expect("id");
+    assert!(id.starts_with("toolu_"), "{id}");
+    let msgs = body["messages"].as_array().expect("messages");
+    assert_eq!(msgs[1]["content"][0]["id"], id);
+    assert_eq!(msgs[1]["content"][0]["input"]["path"], "payments.py");
+    assert_eq!(msgs[2]["content"][0]["tool_use_id"], id);
+    assert_anthropic_pairs(&body);
+}
+
+#[test]
+fn openai_responses_resume_after_a_crash_sends_the_same_reasoning_from_the_journal() {
+    let (reply, body) = resumed(RESPONSES, "or-crash");
+    let items = reply["replay"]["items"]
+        .as_array()
+        .expect("journaled items");
+    assert_eq!(items[0]["encrypted_content"], "enc-0");
+    let input = body["input"].as_array().expect("input");
+    assert_eq!(input[3], items[0], "the reasoning item, verbatim");
+    let call = &input[4];
+    assert_eq!(call["type"], "function_call");
+    assert_eq!(call["call_id"], reply["calls"][0]["provider_id"]);
+    assert_eq!(call["arguments"], reply["calls"][0]["arguments"]);
+    assert_eq!(input[5]["type"], "function_call_output");
+    assert_eq!(input[5]["call_id"], call["call_id"]);
+    assert_responses_pairs(&body);
+}
+
+/// One overflow: compacted and retried. Two in a row: the run stops.
+fn overflows(provider: &str, name: &str) -> Value {
+    let big: String = (1..=60)
+        .map(|i| format!("{i:03} {}\n", "x".repeat(95)))
+        .collect();
+    let steps = json!([
+        { "tool": "write_file", "args": { "path": "big.txt", "content": big } },
+        { "tool": "read_file", "args": { "path": "big.txt" } },
+        { "tool": "read_file", "args": { "path": "big.txt", "start_line": 2 } },
+        { "overflow": true },
+    ]);
+    let mut once = steps.as_array().expect("steps").clone();
+    once.push(json!({ "tool": "finish", "args": { "outcome": "blocked", "summary": "ok" }, "expect": "elided at compaction 1" }));
+    let env = Env::with_provider(&format!("{name}1"), &json!(once), "", provider);
+    assert!(env.run("rp4", &[]).status.success());
+    assert_eq!(
+        stop_reason(&env, "rp4"),
+        (RunState::Finished, Some("blocked".into()))
+    );
+    let ev = env.events("rp4");
+    assert!(
+        ev.iter()
+            .any(|(k, b)| k == "model.error" && b["class"] == "overflow"),
+        "the provider's error was read as an overflow"
+    );
+    let compactions: Vec<&Value> = ev
+        .iter()
+        .filter(|(k, _)| k == "ctx.compacted")
+        .map(|(_, b)| b)
+        .collect();
+    assert_eq!(compactions.len(), 1);
+    assert_eq!(compactions[0]["trigger"], "overflow");
+    let reqs = env.requests();
+    assert_eq!(reqs.len(), 5);
+
+    let mut twice = steps.as_array().expect("steps").clone();
+    twice.push(json!({ "overflow": true }));
+    twice.push(json!({ "text": "unreachable" }));
+    let env2 = Env::with_provider(&format!("{name}2"), &json!(twice), "", provider);
+    assert!(env2.run("rp5", &[]).status.success());
+    assert_eq!(
+        stop_reason(&env2, "rp5"),
+        (RunState::Finished, Some("context_overflow".into()))
+    );
+    assert_eq!(env2.requests().len(), 5);
+    // The request sent after compacting.
+    reqs[4]["body"].clone()
+}
+
+#[test]
+fn anthropic_messages_overflow_compacts_once_then_stops() {
+    let after = overflows(ANTHROPIC, "am-over");
+    assert_anthropic_pairs(&after);
+}
+
+#[test]
+fn openai_responses_overflow_compacts_once_then_stops() {
+    let after = overflows(RESPONSES, "or-over");
+    assert_responses_pairs(&after);
 }

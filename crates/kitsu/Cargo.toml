@@ -19,12 +19,14 @@ path = "src/bin/test_agent.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+getrandom = "0.4"
+keyring = "4"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "system-proxy"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "1"
 
 [lints]

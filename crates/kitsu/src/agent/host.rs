@@ -166,7 +166,7 @@ impl<'a> Host<'a> {
             "model": {
                 "provider": self.native.provider, "base_url": self.native.base_url, "model": self.native.model,
                 "window": self.native.context_window, "max_output": self.native.max_output,
-                "api_key_env": self.native.api_key_env,
+                "api_key_env": self.native.api_key_env, "auth": self.native.auth,
             },
         }))
     }
@@ -221,6 +221,7 @@ impl<'a> Host<'a> {
             add(&mut self.usage.input, &u["prompt"]);
             add(&mut self.usage.output, &u["completion"]);
             add(&mut self.usage.cached_read, &u["cached"]);
+            add(&mut self.usage.cached_write, &u["cache_write"]);
             if let Some(c) = u["cost"].as_f64() {
                 self.usage.cost = Some(self.usage.cost.unwrap_or(0.0) + c);
             }
@@ -904,7 +905,7 @@ impl<'a> Host<'a> {
             .envs(
                 crate::agents::agent_env(self.spec, std::env::vars())
                     .into_iter()
-                    .filter(|(k, _)| k != &self.native.api_key_env),
+                    .filter(|(k, _)| Some(k) != self.native.api_key_env.as_ref()),
             )
             .env("KITSU_RUN", &self.run)
             .stdin(Stdio::null())

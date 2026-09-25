@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """A scripted model server for testing real agents without a model.
 
-Speaks enough of the Anthropic Messages API and of OpenAI Chat Completions
-(`/v1/chat/completions`; streaming and not, for both) for Claude Code,
-Codex-style clients and Kitsu's own loop, records every request as one JSON
-line, and plays either a script file (`--script`) or the built-in script:
+Speaks enough of the Anthropic Messages API (`/v1/messages`), of OpenAI
+Chat Completions (`/v1/chat/completions`; streaming and not, for both) and
+of OpenAI Responses (`/v1/responses`, streamed) for Claude Code, Codex-style
+clients and Kitsu's own loop, records every request as one JSON line, and
+plays either a script file (`--script`, all three APIs) or the built-in
+script (Messages and Chat Completions):
 
   1. answer the first few turns with a tool call (read a file), reporting a
      large `input_tokens` so the agent believes its context is nearly full;
@@ -23,10 +25,15 @@ A script is a JSON list, one entry per model request, played in order:
   {"tools": [{"tool": ..., "args": ...}, ...]}              several at once
   {"text": "Done."}                                         a final answer
   {"overflow": true}                                        a context-overflow error
-  {"status": 429, "retry_after": 0}                         an HTTP error (429, 500, 401...)
+  {"status": 429, "retry_after": 0}                         an HTTP error (429, 529, 500, 401...)
+  {"stream_error": true}                                    a 200 whose stream fails (Messages: overloaded_error, Responses: response.failed)
   {"expect": "substring"}  (on any entry) the request must contain it, or 500
-Optional "usage": {"input": N, "output": M} on any entry. Past the end of the
+Optional "usage": {"input": N, "output": M, "cached": C, "cache_write": W} on
+any entry ("input" is what wasn't read from the cache). Past the end of the
 script every request gets {"text": "script finished"}.
+
+Every Responses reply starts with a reasoning item whose encrypted_content is
+"enc-<n>", n counting the script's entries, so a test can see it come back.
 """
 
 import argparse
@@ -103,6 +110,8 @@ def scripted(text):
     usage = e.get("usage", {})
     if e.get("overflow"):
         return ("overflow",)
+    if e.get("stream_error"):
+        return ("stream_error",)
     if "status" in e:
         return ("http", e["status"], e.get("retry_after"))
     if "tool" in e:
@@ -124,6 +133,35 @@ def plan(body, args):
     if turn <= args.tool_turns:
         return ("tool", args.tool, {"file_path": args.read} if args.tool == "Read" else {"command": "ls"}, "work")
     return ("text", "Done looking. Stopping here.", "final")
+
+
+def anthropic_text(body):
+    out = [text_of(body.get("system")) if isinstance(body.get("system"), list) else str(body.get("system") or "")]
+    for m in body.get("messages", []):
+        c = m.get("content")
+        out.append(text_of(c))
+        for b in c if isinstance(c, list) else []:
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                out.append(json.dumps(b.get("input")))
+    return "\n".join(out)
+
+
+def responses_text(body):
+    out = []
+    for item in body.get("input") or []:
+        c = item.get("content")
+        if isinstance(c, str):
+            out.append(c)
+        elif isinstance(c, list):
+            out.extend(p.get("text", "") for p in c if isinstance(p, dict))
+        for k in ("name", "arguments", "output", "encrypted_content"):
+            if isinstance(item.get(k), str):
+                out.append(item[k])
+    return "\n".join(out)
+
+
+ANTHROPIC_ERRORS = {400: "invalid_request_error", 401: "authentication_error", 403: "permission_error",
+                    429: "rate_limit_error", 500: "api_error", 529: "overloaded_error"}
 
 
 def sse(handler, event, data):
@@ -222,6 +260,133 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
+    def http_error(self, path, body, status, retry_after, err):
+        self.log(path, f"http {status}", body)
+        raw = json.dumps(err).encode()
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(raw)))
+        if retry_after is not None:
+            self.send_header("retry-after", str(retry_after))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def stream_start(self):
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("cache-control", "no-cache")
+        self.end_headers()
+
+    def auth(self):
+        # Which scheme the key came in, never the key.
+        a = self.headers.get("authorization") or ""
+        return {"authorization": a.split(" ")[0] if a else None, "x-api-key": self.headers.get("x-api-key") is not None,
+                "anthropic-version": self.headers.get("anthropic-version")}
+
+    def anthropic(self, path, body):
+        """Scripted Messages API, streamed."""
+        reply = scripted(anthropic_text(body))
+        if reply[0] == "error":
+            self.log(path, "error", body)
+            self._json(500, {"type": "error", "error": {"type": "api_error", "message": reply[1]}})
+            return
+        if reply[0] == "http":
+            kind = ANTHROPIC_ERRORS.get(reply[1], "api_error")
+            self.http_error(path, body, reply[1], reply[2],
+                            {"type": "error", "error": {"type": kind, "message": f"scripted HTTP {reply[1]}"}})
+            return
+        if reply[0] == "overflow":
+            self.log(path, "overflow", body)
+            self._json(400, {"type": "error", "error": {"type": "invalid_request_error",
+                                                         "message": "prompt is too long: 210000 tokens > 200000 maximum"}})
+            return
+        self.log(path, reply[0], dict(body, _headers=self.auth()))
+        mid = f"msg_{int(time.time() * 1000)}"
+        self.stream_start()
+        if reply[0] == "stream_error":
+            sse(self, "message_start", {"type": "message_start", "message": {"id": mid, "type": "message", "role": "assistant",
+                                                                               "content": [], "usage": {"input_tokens": 10, "output_tokens": 1}}})
+            sse(self, "error", {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}})
+            return
+        usage = reply[2]
+        sse(self, "message_start", {"type": "message_start", "message": {
+            "id": mid, "type": "message", "role": "assistant", "model": body.get("model", "stub"), "content": [],
+            "stop_reason": None, "stop_sequence": None,
+            "usage": {"input_tokens": usage.get("input", 1000), "output_tokens": 1,
+                      "cache_read_input_tokens": usage.get("cached", 0), "cache_creation_input_tokens": usage.get("cache_write", 0)}}})
+        sse(self, "ping", {"type": "ping"})
+        if reply[0] == "tools":
+            for k, (name, a) in enumerate(reply[1]):
+                sse(self, "content_block_start", {"type": "content_block_start", "index": k, "content_block": {
+                    "type": "tool_use", "id": f"toolu_{mid}_{k}", "name": name, "input": {}}})
+                raw = json.dumps(a)
+                for part in (raw[: len(raw) // 2], raw[len(raw) // 2:]):
+                    sse(self, "content_block_delta", {"type": "content_block_delta", "index": k,
+                                                      "delta": {"type": "input_json_delta", "partial_json": part}})
+                sse(self, "content_block_stop", {"type": "content_block_stop", "index": k})
+            stop = "tool_use"
+        else:
+            sse(self, "content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+            sse(self, "content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": reply[1]}})
+            sse(self, "content_block_stop", {"type": "content_block_stop", "index": 0})
+            stop = "end_turn"
+        sse(self, "message_delta", {"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None},
+                                    "usage": {"output_tokens": usage.get("output", 20)}})
+        sse(self, "message_stop", {"type": "message_stop"})
+
+    def openai_responses(self, path, body):
+        """Scripted Responses API, streamed, stateless."""
+        with LOCK:
+            n = STATE["step"]
+        reply = scripted(responses_text(body))
+        if reply[0] == "error":
+            self.log(path, "error", body)
+            self._json(500, {"error": {"message": reply[1], "type": "server_error", "code": "server_error"}})
+            return
+        if reply[0] == "http":
+            self.http_error(path, body, reply[1], reply[2],
+                            {"error": {"message": f"scripted HTTP {reply[1]}", "type": "stub", "code": None}})
+            return
+        if reply[0] == "overflow":
+            self.log(path, "overflow", body)
+            self._json(400, {"error": {"message": "Your input exceeds the context window of this model. Please adjust your input and try again.",
+                                       "type": "invalid_request_error", "param": "input", "code": "context_length_exceeded"}})
+            return
+        self.log(path, reply[0], dict(body, _headers=self.auth()))
+        rid = f"resp_{int(time.time() * 1000)}"
+        seq = iter(range(1000))
+        def ev(data):
+            data["sequence_number"] = next(seq)
+            sse(self, data["type"], data)
+        self.stream_start()
+        ev({"type": "response.created", "response": {"id": rid, "status": "in_progress", "output": []}})
+        if reply[0] == "stream_error":
+            ev({"type": "response.failed", "response": {"id": rid, "status": "failed", "output": [],
+                                                        "error": {"code": "server_error", "message": "The model failed to generate a response."}}})
+            return
+        output = [{"type": "reasoning", "id": f"rs_{rid}", "summary": [], "encrypted_content": f"enc-{n}"}]
+        if reply[0] == "tools":
+            for k, (name, a) in enumerate(reply[1]):
+                output.append({"type": "function_call", "id": f"fc_{rid}_{k}", "call_id": f"call_{rid}_{k}",
+                               "name": name, "arguments": json.dumps(a), "status": "completed"})
+        else:
+            output.append({"type": "message", "id": f"msg_{rid}", "role": "assistant", "status": "completed",
+                           "content": [{"type": "output_text", "text": reply[1], "annotations": []}]})
+        for i, item in enumerate(output):
+            ev({"type": "response.output_item.added", "output_index": i, "item": dict(item, status="in_progress")})
+            if item["type"] == "function_call":
+                ev({"type": "response.function_call_arguments.delta", "output_index": i, "item_id": item["id"], "delta": item["arguments"]})
+            if item["type"] == "message":
+                ev({"type": "response.output_text.delta", "output_index": i, "item_id": item["id"], "content_index": 0,
+                    "delta": item["content"][0]["text"]})
+            ev({"type": "response.output_item.done", "output_index": i, "item": item})
+        usage = reply[2]
+        cached = usage.get("cached", 0)
+        ev({"type": "response.completed", "response": {
+            "id": rid, "object": "response", "status": "completed", "model": body.get("model", "stub"), "output": output,
+            "usage": {"input_tokens": usage.get("input", 1000) + cached, "output_tokens": usage.get("output", 20),
+                      "input_tokens_details": {"cached_tokens": cached}, "output_tokens_details": {"reasoning_tokens": 5}}}})
+
     def do_POST(self):
         n = int(self.headers.get("content-length") or 0)
         try:
@@ -231,6 +396,12 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path.endswith("/chat/completions"):
             self.openai(path, body)
+            return
+        if path.endswith("/responses"):
+            self.openai_responses(path, body)
+            return
+        if path.endswith("/messages") and SCRIPT is not None:
+            self.anthropic(path, body)
             return
         if path.endswith("/count_tokens"):
             self._json(200, {"input_tokens": self.args.fill})

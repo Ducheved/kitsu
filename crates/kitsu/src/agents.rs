@@ -52,17 +52,24 @@ pub struct AgentSpec {
 }
 
 /// Kitsu's own agent loop: which model, where, and how much it may spend.
-/// The key is named, never stored: `api_key_env` is read when a run starts.
+/// The key is named, never stored in agents.toml: `api_key_env` or the
+/// keychain entry `auth` names is read when a run starts.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeSpec {
-    /// Only `openai-chat` (OpenAI-compatible Chat Completions, e.g.
-    /// OpenRouter) for now.
+    /// The wire format: `openai-chat` (OpenAI-compatible Chat Completions,
+    /// e.g. OpenRouter), `anthropic-messages` or `openai-responses`.
     #[serde(default = "default_provider")]
     pub provider: String,
     pub base_url: String,
     pub model: String,
-    pub api_key_env: String,
+    /// The environment variable that holds the key.
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    /// `login:<provider>`: the key `kitsu login <provider>` put in the OS
+    /// keychain. Exactly one of this and `api_key_env`.
+    #[serde(default)]
+    pub auth: Option<String>,
     #[serde(default = "default_window")]
     pub context_window: u64,
     #[serde(default = "default_max_output")]
@@ -93,11 +100,26 @@ fn default_tokens() -> u64 {
 
 impl NativeSpec {
     fn validate(&self) -> std::result::Result<(), String> {
-        if self.provider != "openai-chat" {
+        use crate::agent::{login, provider};
+        if !provider::PROVIDERS.contains(&self.provider.as_str()) {
             return Err(format!(
-                "unknown provider `{}` (openai-chat)",
-                self.provider
+                "unknown provider `{}` ({})",
+                self.provider,
+                provider::PROVIDERS.join(", ")
             ));
+        }
+        match (&self.api_key_env, &self.auth) {
+            (Some(_), None) => {}
+            (None, Some(a)) => match a.strip_prefix("login:") {
+                Some(p) if login::PROVIDERS.contains(&p) => {}
+                _ => {
+                    return Err(format!(
+                        "auth `{a}`: expected login:<provider> ({})",
+                        login::PROVIDERS.join(", ")
+                    ));
+                }
+            },
+            _ => return Err("set exactly one of api_key_env and auth".into()),
         }
         let url = self.base_url.trim();
         let loopback = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
@@ -616,6 +638,46 @@ mod tests {
         let custom =
             with_config("[agents.mine]\ncommand = [\"x\"]\nmeta = { mode = \"fast\", n = 2 }\n");
         assert_eq!(custom["mine"].meta, Some(json!({ "mode": "fast", "n": 2 })));
+    }
+
+    #[test]
+    fn a_native_agent_names_exactly_one_key_source_and_a_known_provider() {
+        let parse = |fields: &str| {
+            let text = format!(
+                "[agents.k]\nnative = {{ base_url = \"https://models.example.com/v1\", model = \"m\"{fields} }}\n"
+            );
+            let mut map = BTreeMap::new();
+            apply_config(&mut map, std::path::Path::new("agents.toml"), &text)
+                .map(|_| map)
+                .map_err(|e| e.to_string())
+        };
+        let env = parse(", api_key_env = \"K\"").expect("env key");
+        assert_eq!(
+            env["k"].native.as_ref().map(|n| n.provider.as_str()),
+            Some("openai-chat")
+        );
+        for p in ["anthropic-messages", "openai-responses"] {
+            let login = parse(&format!(
+                ", provider = \"{p}\", auth = \"login:openrouter\""
+            ))
+            .expect(p);
+            let n = login["k"].native.clone().expect("native");
+            assert_eq!(
+                (n.api_key_env, n.auth.as_deref()),
+                (None, Some("login:openrouter"))
+            );
+        }
+        let err = |fields: &str| parse(fields).expect_err(fields);
+        assert!(err("").contains("exactly one of api_key_env and auth"));
+        assert!(err(", api_key_env = \"K\", auth = \"login:openrouter\"").contains("exactly one"));
+        assert!(
+            err(", auth = \"login:anthropic\"").contains("expected login:<provider> (openrouter)")
+        );
+        assert!(err(", auth = \"K\"").contains("expected login:<provider>"));
+        assert!(
+            err(", provider = \"gemini\", api_key_env = \"K\"")
+                .contains("unknown provider `gemini`")
+        );
     }
 
     fn argv(s: &[&str]) -> Vec<String> {

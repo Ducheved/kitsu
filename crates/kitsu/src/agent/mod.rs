@@ -16,12 +16,15 @@
 //! brain running elsewhere later is a transport change, and the host (the
 //! part that touches your files) stays local either way.
 
+pub mod anthropic;
 pub mod brain;
 pub mod context;
 pub mod host;
+pub mod login;
 pub mod loops;
 pub mod protocol;
 pub mod provider;
+pub mod responses;
 pub mod tools;
 
 use serde_json::json;
@@ -58,13 +61,14 @@ pub async fn drive(
         "agent.config",
         &json!({
             "provider": native.provider, "host": host_of, "model": native.model,
+            "api_key_env": native.api_key_env, "auth": native.auth,
             "window": native.context_window, "max_output": native.max_output,
             "turns": native.turns, "tokens": native.tokens,
             "harness_sha": content_id(HARNESS.as_bytes()),
             "tools_sha": content_id(tools::definitions().to_string().as_bytes()),
         }),
     )?;
-    let provider = match provider::OpenAiChat::new(native) {
+    let provider = match provider::Provider::new(native) {
         Ok(p) => p,
         Err(e) => {
             store.apply_run_event(id, &RunEvent::StartFailed(e))?;
