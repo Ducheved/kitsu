@@ -1,14 +1,34 @@
 # Kitsu
 
-Kitsu is a workspace for doing real engineering work with coding agents,
-where you stay the one who decides. It keeps track of the things agents
-lose between steps: what the task is, what must stay true, what was decided
-and what was rejected, and what has actually been verified. The agents
-themselves are the ones you already use (Claude, Codex, Gemini, OpenCode,
-anything that speaks [ACP](https://agentclientprotocol.com)).
+**Agents do the work. Checks decide. You accept.**
+
+Kitsu is an IDE and an agent harness for doing real engineering work with
+coding agents without becoming their memory, scheduler and QA. It runs its
+own agent loop, or the agents you already use (Claude, Codex, Gemini,
+OpenCode, anything that speaks [ACP](https://agentclientprotocol.com)), each
+in its own git worktree, and keeps what they lose between steps: the task,
+the rules, what was decided and rejected, and what has actually been
+verified.
+
+## Three rules Kitsu is built on
+
+1. **The checks decide, not the agent.** "Done" is a check result recorded
+   on the exact tree it ran on. What an agent says about its work is never
+   evidence: a false "all tests pass" costs a refused accept, not an outage.
+2. **Kitsu owns the state; the model is replaceable.** Intent lives in
+   files in your repo, execution in a journal Kitsu writes before every
+   effect. Any agent can pick up any task, compaction can't drop your rules,
+   and a crash resumes without repeating a single side effect.
+3. **Nothing lands without you.** You review the diff, with every change to
+   a rule, test or check shown as a rule change you approve by its exact
+   diff. Accept re-checks the combined result and fast-forwards only if your
+   branch didn't move.
+
+Anything that would break one of these is out, however convenient; the
+[roadmap](docs/roadmap.md) says what that ruled out and why.
 
 It's early. The core loop works end to end and is tested hard on failure
-cases; the rough edges are listed at the bottom.
+cases; what isn't verified yet is listed at the bottom.
 
 ## The problem
 
@@ -218,12 +238,16 @@ Verified here means an automated test or a measurement in this repo does it.
 | Desktop app on Linux (WebKitGTK): open repo, review, accept with `a`, start a run | driven by hand under Xvfb |
 | UI flows and screens | Chromium on fixture data |
 | Kitsu's own loop: fixing the fixture task, false done ×3, compaction at the threshold and after an overflow, crash-and-resume at three points, loop signal, cancel, retries, path confinement, the key never written | 15 end-to-end tests against a scripted model server |
-| **Real agents** (Claude, Codex, Gemini adapters) | **partly**: Claude Code through `kitsu run` against a stub model (compaction probe). A live model on the own loop: not yet |
+| Kitsu's own loop on a live model | **once**: the fixture task on OpenRouter; prompt caching measured (91–96% of the prompt from cache on turns 2–5, half the cost) |
+| **Real agents** (Claude, Codex, Gemini adapters) | **partly**: Claude Code through `kitsu run` against a stub model (compaction probe) |
+| **How good it is on real tasks**, own loop vs Codex vs OpenCode | **not measured yet**; an eval suite with held-out checks is in progress ([roadmap](docs/roadmap.md)) |
 | **macOS and Windows** | **not built or run yet**. Stop on Windows falls back to a 1 s poll; orphan cleanup is Linux-only |
 | **Sandboxing** | **none**. Worktrees isolate changes, not processes. Agents run with your permissions |
 
 ## Docs
 
+- [`docs/roadmap.md`](docs/roadmap.md): what's being built now, next and
+  later, and what we decided not to build.
 - [`docs/design.md`](docs/design.md): how it works, what owns what, what
   happens when things fail, measurements.
 - [`docs/research.md`](docs/research.md): what we learned from Zed, Cursor,
