@@ -88,6 +88,12 @@ pub enum Policy {
     /// Everything inside the worktree is allowed, including commands.
     /// Anything touching paths outside it still waits for a human.
     Auto,
+    /// Ask, except that Kitsu's own loop may let a shell command through
+    /// when the configured judge (`[judge]` in agents.toml) says it's
+    /// low-risk and stays in the worktree, above its threshold. No judge,
+    /// a lower probability or no answer: it waits for a human, as in Ask.
+    /// ACP agents get Ask.
+    Triage,
 }
 
 impl Policy {
@@ -95,6 +101,7 @@ impl Policy {
         match s {
             "ask" => Some(Policy::Ask),
             "auto" => Some(Policy::Auto),
+            "triage" => Some(Policy::Triage),
             _ => None,
         }
     }
@@ -697,8 +704,8 @@ fn decide(policy: Policy, params: &Value, worktree: &Path) -> Decision {
     );
     match policy {
         Policy::Auto => Decision::Answer(allow, "policy auto"),
-        Policy::Ask if local => Decision::Answer(allow, "policy: inside worktree"),
-        Policy::Ask => Decision::Human,
+        Policy::Ask | Policy::Triage if local => Decision::Answer(allow, "policy: inside worktree"),
+        Policy::Ask | Policy::Triage => Decision::Human,
     }
 }
 
@@ -1040,5 +1047,15 @@ mod tests {
             decide(Policy::Auto, &no_allow, wt),
             Decision::Human
         ));
+        // ACP agents have no judge: triage is ask for them.
+        assert!(matches!(
+            decide(Policy::Triage, &perm("execute", inside), wt),
+            Decision::Human
+        ));
+        assert!(matches!(
+            decide(Policy::Triage, &perm("edit", inside), wt),
+            Decision::Answer(..)
+        ));
+        assert_eq!(Policy::parse("triage"), Some(Policy::Triage));
     }
 }
