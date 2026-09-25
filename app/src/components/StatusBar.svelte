@@ -14,7 +14,12 @@
     <button role="radio" aria-checked={app.mode === "work"} class:on={app.mode === "work"} onclick={() => app.setMode("work")} title="⌘1">{t("layout.work")}</button>
     <button role="radio" aria-checked={app.mode === "code"} class:on={app.mode === "code"} onclick={() => app.setMode("code")} title="⌘2">{t("layout.code")}</button>
   </div>
-  {#if ov?.repo.branch}<span class="item mono">⎇ {ov.repo.branch}</span>{/if}
+  {#if app.repo}
+    <button class="item where" title="{t('project.switch')} · ⌘O" onclick={() => app.toggleSwitcher()}>
+      <span class="pname">{app.project?.name ?? ov?.repo.name ?? ""}</span>
+      {#if ov?.repo.branch}<span class="mono">⎇ {ov.repo.branch}</span>{/if}
+    </button>
+  {/if}
   {#if ov && !ov.repo.trusted}<span class="item tone-warn">{t("sb.untrusted")}</span>{/if}
   {#if needs}
     <button class="item tone-warn" onclick={() => app.setMode("work")}>● {t("sb.needsYou", { n: needs })}</button>
@@ -81,6 +86,15 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
+  }
+  .where {
+    display: inline-flex;
+    align-items: baseline;
+    gap: var(--s2);
+  }
+  .pname {
+    color: var(--text);
+    font-weight: 500;
   }
   .spacer {
     flex: 1;

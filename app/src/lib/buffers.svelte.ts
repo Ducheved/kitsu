@@ -4,7 +4,7 @@
 // save if the file changed on disk in the meantime.
 
 import { EditorState, type Text } from "@codemirror/state";
-import { api, errorKind, errorText } from "./api";
+import { errorKind, errorText } from "./api";
 import { app } from "./app.svelte";
 import { base } from "./editor";
 import { t } from "./i18n/index.svelte";
@@ -22,6 +22,24 @@ export interface Buffer {
 class Buffers {
   open = $state<Buffer[]>([]);
   active = $state<string | null>(null);
+  /** Whose files these are. Another project's tabs wait in `parked`,
+   *  unsaved edits and undo history included, until you switch back. */
+  private repo = "";
+  private parked = new Map<string, { open: Buffer[]; active: string | null }>();
+
+  switchTo(repo: string) {
+    if (repo === this.repo) return;
+    if (this.repo) this.parked.set(this.repo, { open: this.open, active: this.active });
+    const next = this.parked.get(repo);
+    this.parked.delete(repo);
+    this.repo = repo;
+    this.open = next?.open ?? [];
+    this.active = next?.active ?? null;
+  }
+
+  private get api() {
+    return app.apiFor(this.repo);
+  }
 
   get current(): Buffer | undefined {
     return this.open.find((b) => b.path === this.active);
@@ -30,7 +48,10 @@ class Buffers {
   async show(path: string) {
     if (!this.open.some((b) => b.path === path)) {
       try {
-        const f = await api.readFile(path);
+        const repo = this.repo;
+        const f = await this.api.readFile(path);
+        // Switched projects while it loaded: this file belongs to the other one.
+        if (repo !== this.repo) return;
         const state = EditorState.create({ doc: f.text, extensions: base(path, { vim: app.prefs.vim, dark: app.dark }) });
         this.open.push({ path, state, version: f.version, saved: state.doc, dirty: false, conflict: false });
       } catch (e) {
@@ -55,7 +76,7 @@ class Buffers {
     const doc = b.state.doc;
     const text = doc.toString();
     try {
-      b.version = await api.writeFile(b.path, text, b.version);
+      b.version = await this.api.writeFile(b.path, text, b.version);
       b.saved = doc;
       // Typing may have continued while the write was in flight.
       b.dirty = !b.state.doc.eq(doc);
@@ -91,3 +112,4 @@ class Buffers {
 }
 
 export const buffers = new Buffers();
+app.onSwitch((repo) => buffers.switchTo(repo));

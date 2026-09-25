@@ -1,10 +1,12 @@
 <script lang="ts">
   import { app } from "../lib/app.svelte";
-  import { api, errorText } from "../lib/api";
+  import { errorText } from "../lib/api";
   import { i18n, t } from "../lib/i18n/index.svelte";
   import { checkWord } from "../lib/status";
   import { render } from "../lib/md";
   import type { Rules } from "../lib/types";
+  // This project's commands, fixed for as long as the component lives.
+  const api = app.api;
 
   let rules = $state<Rules | null>(null);
   let error = $state<string | null>(null);

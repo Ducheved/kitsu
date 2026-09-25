@@ -181,6 +181,14 @@ accept. It's all keyboard-driven: `j`/`k`, `⏎`, `r` run, `s` stop, `a`
 accept, `x` discard, `n` new task, `⌘K` for everything, and a CodeMirror
 editor with vim keys (`:w`, `:q`, `:e`). Press `?` for the rest.
 
+Several projects share one window. The rail header switches between them
+(`⌘O`, or `⌥1`…`⌥9`) and shows what needs you in each; Settings → Projects
+adds, renames, reorders and removes them, and `g b` shows a project's
+branches and worktrees, Kitsu's run worktrees marked with their task. The
+list is `workspaces.toml` in the Kitsu config dir; every per-project thing
+(rules, runs, trust) stays in that project. Every command the window sends
+names its project, so nothing lands in the wrong one after a switch.
+
 Runs started from the window are ordinary `kitsu run` processes. Close the
 window and they keep going.
 
@@ -223,6 +231,7 @@ checks, decisions and what's next.
 | `kitsu accept <run>` / `discard` | land it or throw it away |
 | `kitsu log [-f]` | the event log |
 | `kitsu recover` | settle anything left behind by a crash (also automatic) |
+| `kitsu workspaces [list\|add\|remove]` | the projects the window shows; removing one never touches its files |
 
 Add `--json` to any of them.
 

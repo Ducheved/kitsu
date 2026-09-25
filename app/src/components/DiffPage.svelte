@@ -4,10 +4,12 @@
   import { EditorView } from "@codemirror/view";
   import { onDestroy } from "svelte";
   import { app } from "../lib/app.svelte";
-  import { api, errorText } from "../lib/api";
+  import { errorText } from "../lib/api";
   import { base } from "../lib/editor";
   import { t } from "../lib/i18n/index.svelte";
   import type { FileDiff } from "../lib/types";
+  // This project's commands, fixed for as long as the component lives.
+  const api = app.api;
 
   let { run, path }: { run: string; path: string } = $props();
 

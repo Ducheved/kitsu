@@ -2,12 +2,14 @@
   // The Code layout's view of the agents: only what's working or needs you,
   // with the one-key answers right here so you don't have to leave the file.
   import { app } from "../lib/app.svelte";
-  import { api, errorText } from "../lib/api";
+  import { errorText } from "../lib/api";
   import { t } from "../lib/i18n/index.svelte";
   import { inline } from "../lib/md";
   import { statusText } from "../lib/status";
   import Fox from "./Fox.svelte";
   import Glyph from "./Glyph.svelte";
+  // This project's commands, fixed for as long as the component lives.
+  const api = app.api;
 
   const tasks = $derived((app.overview?.tasks ?? []).filter((x) => x.attention === "needs_you" || x.attention === "working"));
   const asks = $derived(app.overview?.asks ?? []);

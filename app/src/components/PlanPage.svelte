@@ -5,7 +5,7 @@
   // where the blocks sit is view state, kept per repository in local prefs.
   import { onMount, tick } from "svelte";
   import { app } from "../lib/app.svelte";
-  import { api, errorText } from "../lib/api";
+  import { errorText } from "../lib/api";
   import { t } from "../lib/i18n/index.svelte";
   import {
     BLOCK_H,
@@ -30,6 +30,8 @@
   import type { Attention, Plan, PlanTask, TaskView } from "../lib/types";
   import Fox from "./Fox.svelte";
   import Glyph from "./Glyph.svelte";
+  // This project's commands, fixed for as long as the component lives.
+  const api = app.api;
 
   const MIN_K = 0.2;
   const MAX_K = 2;
