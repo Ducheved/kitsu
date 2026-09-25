@@ -19,12 +19,12 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::check::{CheckRun, CheckStatus, status_at};
+use crate::check::{CheckRun, CheckStatus, Receipt, receipt, status_at};
 use crate::error::{Error, Result};
 use crate::git::{FileStat, Git};
 use crate::intent::{self, Intent};
-use crate::status::{protected_changes, required_checks};
-use crate::store::{IntegrationState, RunRow, Store};
+use crate::status::{protected_changes, required_checks, unchecked_paths};
+use crate::store::{IntegrationState, JudgmentRow, RunRow, Store};
 use crate::util::{content_id, short_id};
 use crate::workspace::{Instance, Workspace};
 
@@ -43,6 +43,18 @@ pub struct Review {
     /// It is a hash of their diff; if they change, the approval doesn't carry.
     pub approval_token: Option<String>,
     pub checks: Vec<(String, CheckStatus)>,
+    /// What each mark in `checks` stands on: the recorded run of the
+    /// command. A check without a receipt here has not run on anything this
+    /// change can be judged by, and is never shown as passing.
+    pub receipts: Vec<Receipt>,
+    /// Changed paths no required check looks at (`status::unchecked_paths`).
+    /// Unknown: accepting them is the reviewer's call alone.
+    pub unguarded: Vec<String>,
+    /// The agent's own last word on what it did. A claim, not evidence.
+    pub claim: Option<String>,
+    /// Typed judgments made during the run (`judge.rs`): probabilities, not
+    /// receipts.
+    pub judgments: Vec<JudgmentRow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,6 +64,9 @@ pub enum Accepted {
         commit: String,
         closed_task: bool,
         notes: Vec<String>,
+        /// Changed paths that landed with no check looking at them: you
+        /// accepted them on your own reading.
+        unguarded: Vec<String>,
     },
     NeedsApproval {
         paths: Vec<String>,
@@ -137,16 +152,29 @@ pub fn review(ws: &Workspace, store: &Store, run_id: &str) -> Result<Review> {
     let protected = protected_changes(&intent, &changed);
     let approval_token = protected_diff_token(&git, &from, &snapshot, &protected)?;
     let mut checks = Vec::new();
+    let mut receipts = Vec::new();
+    // No task in your checkout: nothing says what is required, so nothing
+    // looks at any of it.
+    let mut unguarded = changed.clone();
     if let Some(task) = intent.tasks.get(&run.task) {
         let tree = git.tree_of(&snapshot)?;
         for req in required_checks(&intent, task, Some(&changed)) {
-            checks.push((
-                req.name.clone(),
-                status_at(&git, store, &intent.config.checks[&req.name], &tree)?,
-            ));
+            let s = status_at(&git, store, &intent.config.checks[&req.name], &tree)?;
+            receipts.extend(receipt(store, &s)?);
+            checks.push((req.name.clone(), s));
         }
+        unguarded = unchecked_paths(&intent, task, &changed);
     }
+    let claim = store
+        .last_run_event(&run.id, "agent.message")?
+        .and_then(|e| e.body["text"].as_str().map(str::to_owned))
+        .filter(|t| !t.trim().is_empty());
+    let judgments = store.judgments_for_run(&run.id)?;
     Ok(Review {
+        receipts,
+        unguarded,
+        claim,
+        judgments,
         run: run.id,
         target,
         target_head: head,
@@ -210,9 +238,12 @@ pub fn accept(
     let id = short_id('i');
     store.insert_integration(&id, run_id, &target, &head, opts.close_task, &me.id)?;
     let dir = ws.integration_dir(&id);
-    let result = build_and_apply(
+    let mut result = build_and_apply(
         ws, store, &git, &intent, task, &run, &snapshot, &id, &dir, &target, &head, opts,
     );
+    if let Ok(Accepted::Applied { unguarded, .. }) = &mut result {
+        *unguarded = unchecked_paths(&intent, task, &changed);
+    }
     if let Ok(_guard) = ws.lock_worktrees() {
         let _ = ws.git().worktree_remove(&dir);
     }
@@ -360,6 +391,7 @@ fn build_and_apply(
         commit: candidate,
         closed_task: closed,
         notes,
+        unguarded: Vec::new(),
     })
 }
 

@@ -838,6 +838,18 @@ impl Store {
         Ok(rows)
     }
 
+    /// The latest event of `kind` in `run`, if any.
+    pub fn last_run_event(&self, run: &str, kind: &str) -> Result<Option<EventRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT seq, run, at, kind, body FROM events WHERE run = ?1 AND kind = ?2 ORDER BY seq DESC LIMIT 1",
+                params![run, kind],
+                event_row,
+            )
+            .optional()?)
+    }
+
     pub fn last_seq(&self) -> Result<i64> {
         Ok(self
             .conn

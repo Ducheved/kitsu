@@ -283,6 +283,120 @@ impl CheckStatus {
     }
 }
 
+impl CheckStatus {
+    /// The evidence row this status stands on, if there is one.
+    pub fn evidence(&self) -> Option<i64> {
+        match self {
+            CheckStatus::Current { evidence, .. }
+            | CheckStatus::Carried { evidence, .. }
+            | CheckStatus::Stale { evidence, .. } => Some(*evidence),
+            CheckStatus::Unverified => None,
+        }
+    }
+}
+
+/// How a receipt relates to the tree it is shown for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Binding {
+    /// It ran on exactly this tree.
+    Current,
+    /// It ran on another tree, and nothing inside the check's `scope` differs.
+    Carried,
+    /// It ran on another tree and files it looks at changed since: it says
+    /// nothing about this one.
+    Stale,
+}
+
+/// What a check mark stands on: one recorded run of the command. A check is
+/// shown as passing only next to one of these.
+#[derive(Debug, Clone, Serialize)]
+pub struct Receipt {
+    pub check: String,
+    pub evidence: i64,
+    /// The command as it ran.
+    pub command: String,
+    /// Identity of the command and its timeout (`CheckDef::fingerprint`).
+    pub fingerprint: String,
+    /// The tree the command ran on.
+    pub tree: String,
+    pub outcome: CheckOutcome,
+    /// None when the process never exited on its own (killed at a timeout)
+    /// or never started.
+    pub exit_code: Option<i32>,
+    pub duration_ms: i64,
+    pub started_at: i64,
+    /// The run the check ran for; none when it ran on your checkout.
+    pub run: Option<String>,
+    pub binding: Binding,
+}
+
+impl Receipt {
+    /// A green mark: it passed, exit code 0, on this tree or one the check
+    /// can't tell apart from it.
+    pub fn passing(&self) -> bool {
+        self.outcome == CheckOutcome::Pass
+            && self.exit_code == Some(0)
+            && self.binding != Binding::Stale
+    }
+
+    /// One line for a terminal: exit code, duration, tree, binding, when,
+    /// and the command (its fingerprint when the command is long).
+    pub fn line(&self, now: i64) -> String {
+        const LONG: usize = 48;
+        let exit = match self.exit_code {
+            Some(c) => format!("exit {c}"),
+            None => format!("no exit code ({})", self.outcome.as_str()),
+        };
+        let binding = match self.binding {
+            Binding::Current => "current",
+            Binding::Carried => "carried (nothing in its scope changed since)",
+            Binding::Stale => "stale (files it looks at changed since)",
+        };
+        let command = if self.command.chars().count() > LONG {
+            format!(
+                "command {}",
+                &self.fingerprint[..self.fingerprint.len().min(12)]
+            )
+        } else {
+            format!("`{}`", self.command)
+        };
+        format!(
+            "{exit} · {:.1}s · tree {} · {binding} · {} · {command}",
+            self.duration_ms as f64 / 1000.0,
+            &self.tree[..self.tree.len().min(10)],
+            crate::util::ago(self.started_at, now),
+        )
+    }
+}
+
+/// The receipt behind `status`, read from the evidence row it names.
+pub fn receipt(store: &Store, status: &CheckStatus) -> Result<Option<Receipt>> {
+    let binding = match status {
+        CheckStatus::Current { .. } => Binding::Current,
+        CheckStatus::Carried { .. } => Binding::Carried,
+        CheckStatus::Stale { .. } => Binding::Stale,
+        CheckStatus::Unverified => return Ok(None),
+    };
+    let Some(id) = status.evidence() else {
+        return Ok(None);
+    };
+    let e = store.evidence(id)?;
+    Ok(Some(Receipt {
+        check: e.check_name,
+        evidence: e.id,
+        command: e.command,
+        fingerprint: e.fingerprint,
+        tree: e.tree,
+        outcome: e.outcome,
+        exit_code: e.exit_code,
+        duration_ms: e.duration_ms,
+        started_at: e.started_at,
+        run: e.run,
+        binding,
+    }))
+}
+
 pub fn status_at(git: &Git, store: &Store, check: &CheckDef, tree: &str) -> Result<CheckStatus> {
     let fp = check.fingerprint();
     if let Some(e) = store.evidence_at(&fp, tree)? {
