@@ -43,6 +43,13 @@ above the threshold (default 0.9) with a stored judgment, it runs and the
 `permission` event names the judgment. Below it, unknown, or unscreened
 trouble: you are asked, and the ask shows the probability or the reason.
 
+Triage saves questions; it is not a security boundary. The screen is a
+word list that `python -c`, `sh -c "$(…)"` or a script the agent just wrote
+walk around, and the judge only reads the command line. With no sandbox, a
+prompt-injected or hostile agent is exactly as dangerous under `triage` as
+under `auto`; use it only where you'd use `auto`, and keep `ask` for
+untrusted input until `sandbox-linux` lands.
+
 The threshold starts high because calibration on this question is
 unmeasured: in Hermes' compaction eval Jev's probabilities for a keep
 question never passed 0.20. `judge-live-eval` decides: false-allow rate on

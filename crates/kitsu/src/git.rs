@@ -205,6 +205,19 @@ impl Git {
         if real.exists() {
             std::fs::copy(&real, &tmp)
                 .map_err(|e| Error::io(format!("copying {}", real.display()), e))?;
+            // Keep the index's mtime on the copy. Git re-hashes an entry whose
+            // file changed in the same timestamp tick as the index write
+            // ("racy"), judged against the index file's mtime; a fresh mtime
+            // makes such an entry look clean, and a same-size edit right after
+            // a commit would be hashed as the old content.
+            let mtime = std::fs::metadata(&real)
+                .and_then(|m| m.modified())
+                .map_err(|e| Error::io(real.display().to_string(), e))?;
+            std::fs::File::options()
+                .write(true)
+                .open(&tmp)
+                .and_then(|f| f.set_modified(mtime))
+                .map_err(|e| Error::io(tmp.display().to_string(), e))?;
         }
         let result = (|| {
             self.unhide_in(&tmp)?;

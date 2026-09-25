@@ -21,3 +21,11 @@ Not "flaky" until explained. Hypotheses, none confirmed:
 
 Done when the cause is shown, or the next failure's message is captured
 and explains it.
+
+2026-09-25: `git::tests::worktree_tree_sees_changes_git_was_told_to_ignore`
+failed the same way under load (5/30, then 4/60): the third snapshot missed
+two same-size edits. With `worktree_tree` keeping the index's mtime on its
+copy (the first hypothesis), 0/60 under the same load. That's statistical
+evidence, not a proof: a deterministic test didn't reproduce it, because git
+smudges racy entries when the commit writes the index. Left open until the
+mechanism is shown or it stays at 0 in CI.
