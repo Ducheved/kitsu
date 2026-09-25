@@ -383,6 +383,7 @@ const ru: Messages = {
   "layout.codeHint": "Сначала файлы, вкладки и редактор. Агенты — в полосе сбоку.",
   "settings.vim": "Vim-клавиши в редакторе",
   "settings.done": "Показывать готовые задачи в списке",
+  "settings.paws": "Лисьи следы в углу",
 
   "explorer.title": "Файлы",
   "explorer.filter": "Найти файл",

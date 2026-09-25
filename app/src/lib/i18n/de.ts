@@ -343,6 +343,7 @@ const de: Messages = {
   "layout.codeHint": "Dateien, Tabs und Editor zuerst. Agenten bleiben in einer Leiste am Rand.",
   "settings.vim": "Vim-Tasten im Editor",
   "settings.done": "Erledigte Aufgaben in der Liste zeigen",
+  "settings.paws": "Fuchsspuren in der Ecke",
 
   "explorer.title": "Dateien",
   "explorer.filter": "Dateien filtern",

@@ -343,6 +343,7 @@ const ja: Messages = {
   "layout.codeHint": "ファイル、タブ、エディタが中心。エージェントは横のストリップに表示されます。",
   "settings.vim": "エディタで vim キーを使用",
   "settings.done": "完了したタスクを一覧に表示",
+  "settings.paws": "隅にキツネの足あとを表示",
 
   "explorer.title": "ファイル",
   "explorer.filter": "ファイルを絞り込む",

@@ -17,6 +17,7 @@
   import StatusBar from "./components/StatusBar.svelte";
   import TaskPage from "./components/TaskPage.svelte";
   import Fox from "./components/Fox.svelte";
+  import Paws from "./components/Paws.svelte";
   import Tour from "./components/Tour.svelte";
   import { tour } from "./lib/tour.svelte";
   import { kitsuTour } from "./lib/tour-steps";
@@ -46,6 +47,8 @@
   const showEditor = $derived(app.view.kind === "file" || (code && app.view.kind === "home" && buffers.open.length > 0));
   // Each page arrives with a short fade; the editor is one page however many
   // files it switches between, so it doesn't flicker on every tab.
+  // Placed explicitly so the paw prints can share main's grid cell.
+  const mainColumn = $derived(code && !app.prefs.tree ? "1" : "2");
   const viewKey = $derived(
     showEditor ? "editor" : app.view.kind === "task" ? `task:${app.view.id}` : app.view.kind === "diff" ? `diff:${app.view.run}:${app.view.path}` : app.view.kind,
   );
@@ -249,11 +252,19 @@
   {:else}
     <Rail bind:filter bind:filtering />
   {/if}
-  <main class="scroll" class:flush={showEditor || app.view.kind === "diff"}>
+  <main class="scroll" class:flush={showEditor || app.view.kind === "diff"} style:grid-column={mainColumn}>
     {#key viewKey}
       <div class="view" class:fill={showEditor || app.view.kind === "diff"}>{@render page()}</div>
     {/key}
   </main>
+  <!-- Same grid cell as main, laid over its bottom-right corner. Not over the
+       editor or a diff, where code runs to the edge. They walk in once at
+       start and again after each accept. -->
+  {#if app.prefs.paws && !showEditor && app.view.kind !== "diff"}
+    <div class="corner" style:grid-column={mainColumn} aria-hidden="true">
+      {#key app.accepted}<span class="trail"><Paws count={5} heading={-38} size={11} walk delay={app.accepted ? 700 : 300} /></span>{/key}
+    </div>
+  {/if}
   {#if code && app.prefs.strip}<AgentStrip />{/if}
   <div class="status"><StatusBar /></div>
 </div>
@@ -279,6 +290,7 @@
     <div class="toast {app.toast.tone}" role="status">
       {#if app.toast.cheer}<Fox state="happy" size={28} />{/if}
       <span>{app.toast.text}</span>
+      {#if app.toast.cheer && app.prefs.paws}<span class="leaving"><Paws count={3} heading={90} size={9} walk delay={450} /></span>{/if}
     </div>
   {/key}
 {/if}
@@ -306,9 +318,37 @@
     grid-column: 1 / -1;
   }
   main {
+    grid-row: 1;
     min-width: 0;
     min-height: 0;
     overflow: auto;
+  }
+  .corner {
+    grid-row: 1;
+    z-index: 1;
+    align-self: end;
+    display: flex;
+    justify-content: flex-end;
+    padding: 0 var(--s5) var(--s4) 0;
+    pointer-events: none;
+    color: var(--paw);
+    container-type: inline-size;
+  }
+  /* Only where the reading column (760px at most) leaves a margin wider
+     than the trail, so the prints never sit on text. */
+  .trail {
+    display: none;
+  }
+  @container (min-width: 900px) {
+    .trail {
+      display: block;
+    }
+  }
+  .leaving {
+    display: flex;
+    margin-left: var(--s1);
+    opacity: 0.55;
+    --paw-walk: var(--accent);
   }
   main.flush {
     overflow: hidden;

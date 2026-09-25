@@ -49,6 +49,7 @@
     <section class="toggles">
       <label><input type="checkbox" checked={app.prefs.vim} onchange={(e) => ((app.prefs.vim = (e.currentTarget as HTMLInputElement).checked), app.savePrefs())} /> {t("settings.vim")}</label>
       <label><input type="checkbox" checked={app.prefs.showDone} onchange={(e) => ((app.prefs.showDone = (e.currentTarget as HTMLInputElement).checked), app.savePrefs())} /> {t("settings.done")}</label>
+      <label><input type="checkbox" checked={app.prefs.paws} onchange={(e) => ((app.prefs.paws = (e.currentTarget as HTMLInputElement).checked), app.savePrefs())} /> {t("settings.paws")}</label>
     </section>
   </div>
 </div>

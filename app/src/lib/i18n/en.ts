@@ -346,6 +346,7 @@ const en = {
   "layout.codeHint": "Files, tabs and the editor first. Agents stay in a strip on the side.",
   "settings.vim": "Vim keys in the editor",
   "settings.done": "Show done tasks in the list",
+  "settings.paws": "Fox paw prints in the corner",
 
   "explorer.title": "Files",
   "explorer.filter": "Filter files",

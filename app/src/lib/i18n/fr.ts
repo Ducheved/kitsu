@@ -351,6 +351,7 @@ const fr: Messages = {
   "layout.codeHint": "Fichiers, onglets et éditeur d’abord. Les agents restent dans un bandeau sur le côté.",
   "settings.vim": "Touches vim dans l’éditeur",
   "settings.done": "Afficher les tâches terminées dans la liste",
+  "settings.paws": "Empreintes de renard dans le coin",
 
   "explorer.title": "Fichiers",
   "explorer.filter": "Filtrer les fichiers",

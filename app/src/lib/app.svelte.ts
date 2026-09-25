@@ -29,12 +29,14 @@ interface Prefs {
   layout: Layout;
   tree: boolean;
   strip: boolean;
+  /** Fox paw prints in the corner of the main pane. */
+  paws: boolean;
 }
 
 const PREFS_KEY = "kitsu.prefs";
 
 function loadPrefs(): Prefs {
-  const d: Prefs = { vim: true, agent: "claude", policy: "ask", showDone: false, lang: "system", theme: "system", layout: "adaptive", tree: true, strip: true };
+  const d: Prefs = { vim: true, agent: "claude", policy: "ask", showDone: false, lang: "system", theme: "system", layout: "adaptive", tree: true, strip: true, paws: true };
   try {
     return { ...d, ...JSON.parse(localStorage.getItem(PREFS_KEY) ?? "{}") };
   } catch {
