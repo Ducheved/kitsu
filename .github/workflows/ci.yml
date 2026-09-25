@@ -1,45 +1,32 @@
+# Every push to any branch and every pull request: the checks, then (once
+# they pass) installers and CLI archives for Windows, Linux and macOS as
+# workflow artifacts. Releases are release.yml's job. See docs/releasing.md.
 name: ci
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # A newer push supersedes a branch build; every commit on main keeps its run.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  rust:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: System libraries for the Tauri app
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
-      # rust-toolchain.toml pins the version; rustup picks it up.
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
-      # The app crate embeds app/dist at build time.
-      - run: mkdir -p app/dist && echo '<!doctype html>' > app/dist/index.html
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-      - name: Stress budget (100 concurrent runs)
-        run: |
-          cargo build --release -p kitsu --bins --example scale
-          ./target/release/examples/scale stress 100
+  checks:
+    uses: ./.github/workflows/checks.yml
 
-  ui:
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: app
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: app/package-lock.json
-      - run: npm ci
-      - run: npm run check
-      - run: npm test
-      - run: npm run build
+  build:
+    needs: checks
+    # A branch in this repository is already built by its push; build pull
+    # requests only when they come from a fork.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    uses: ./.github/workflows/build.yml
+    with:
+      retention-days: ${{ github.ref == 'refs/heads/main' && 30 || 7 }}
+    # No secrets: dev builds are never signed, and never see signing keys.
