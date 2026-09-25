@@ -548,6 +548,9 @@ impl Accumulator {
             calls: self
                 .calls
                 .into_iter()
+                // A gap in the stream's indexes leaves a slot nothing was
+                // sent for: not a call.
+                .filter(|(_, name, arguments)| !(name.is_empty() && arguments.is_empty()))
                 .enumerate()
                 .map(|(i, (id, name, arguments))| ToolCall {
                     id: if id.is_empty() {
@@ -595,6 +598,19 @@ mod tests {
             assert_eq!(r.finish.as_deref(), Some("tool_calls"));
             assert_eq!((r.usage.prompt, r.usage.completion), (Some(7), Some(2)));
         }
+    }
+
+    #[test]
+    fn a_gap_in_the_call_indexes_is_not_a_call() {
+        // Some proxies number the only call 1: slot 0 was never sent.
+        let mut acc = Accumulator::default();
+        acc.chunk(&json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 1, "id": "c1", "function": { "name": "read_file", "arguments": "{}" } }] } }] }));
+        let r = acc.finish().expect("reply");
+        assert_eq!(r.calls.len(), 1, "{:?}", r.calls);
+        assert_eq!(
+            (r.calls[0].id.as_str(), r.calls[0].name.as_str()),
+            ("c1", "read_file")
+        );
     }
 
     #[test]

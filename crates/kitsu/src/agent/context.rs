@@ -37,8 +37,9 @@ pub struct Step {
     pub turn: u64,
     pub text: Option<String>,
     pub calls: Vec<Call>,
-    /// What Kitsu answered to a reply with no tool calls (which it takes as
-    /// `finish`). Rendered as a user message after the step.
+    /// What Kitsu answered to a reply with no tool calls: a nudge, a note
+    /// that it was cut off, or, when it's taken as `finish`, finish's
+    /// answer. Rendered as a user message after the step.
     pub notice: Option<String>,
     /// Opaque provider state for this reply (`provider::Reply::replay`),
     /// carried through for the provider that wrote it.
@@ -132,8 +133,17 @@ pub fn fold(entries: &[Value]) -> Conversation {
                 }
             }
             "loop.signal" => {
-                if let (Some(c), Some(n)) = (body["call"].as_str(), body["note"].as_str()) {
-                    notes.insert(c.to_string(), n.to_string());
+                let note = body["note"].as_str();
+                if let (Some(c), Some(n)) = (body["call"].as_str(), note) {
+                    notes
+                        .entry(c.to_string())
+                        .and_modify(|x| *x = format!("{x}\n{n}"))
+                        .or_insert_with(|| n.to_string());
+                } else if let (Some(turn), Some(n)) = (body["turn"].as_u64(), note)
+                    && let Some(s) = conv.steps.iter_mut().rev().find(|s| s.turn == turn)
+                {
+                    // Said about a reply as a whole (no call, cut off).
+                    s.notice = Some(n.to_string());
                 }
             }
             "ctx.compacted" => {

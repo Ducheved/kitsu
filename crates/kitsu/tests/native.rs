@@ -356,6 +356,7 @@ fn a_false_done_is_refused_three_times_then_the_run_stops_unverified() {
         { "tool": "write_file", "args": { "path": "payments.py", "content": naive_payments() } },
         { "tool": "finish", "args": { "outcome": "done", "summary": "Done." } },
         { "text": "I'm confident it's done.", "expect": "Not done: 1 of" },
+        { "text": "Still done.", "expect": "Another reply in a row without a tool call" },
         { "tool": "finish", "args": { "outcome": "done", "summary": "Really done." } },
         { "text": "unreachable" },
     ]);
@@ -367,20 +368,28 @@ fn a_false_done_is_refused_three_times_then_the_run_stops_unverified() {
         (RunState::Finished, Some("unverified".into()))
     );
     let reqs = env.requests();
-    assert_eq!(reqs.len(), 4, "no request after the third refusal");
-    // The text-only reply counted as a finish, and its refusal reached the
-    // model as a message after that reply.
-    let msgs = reqs[3]["body"]["messages"].as_array().expect("messages");
-    let at = msgs
-        .iter()
-        .position(|m| m["role"] == "assistant" && m["content"] == "I'm confident it's done.")
-        .expect("the text-only reply");
-    assert_eq!(msgs[at + 1]["role"], "user", "{msgs:#?}");
-    assert!(
+    assert_eq!(reqs.len(), 5, "no request after the third refusal");
+    // The first text-only reply was nudged; the second, right after it,
+    // counted as a finish, and its refusal reached the model as a message
+    // after that reply.
+    let msgs = reqs[4]["body"]["messages"].as_array().expect("messages");
+    let after = |text: &str| {
+        let at = msgs
+            .iter()
+            .position(|m| m["role"] == "assistant" && m["content"] == text)
+            .expect("the text-only reply");
+        assert_eq!(msgs[at + 1]["role"], "user", "{msgs:#?}");
         msgs[at + 1]["content"]
             .as_str()
             .expect("notice")
-            .starts_with("Not done: 1 of"),
+            .to_string()
+    };
+    assert!(
+        after("I'm confident it's done.").starts_with("Your reply had no tool call"),
+        "{msgs:#?}"
+    );
+    assert!(
+        after("Still done.").starts_with("Not done: 1 of"),
         "{msgs:#?}"
     );
     assert!(
@@ -587,6 +596,14 @@ fn two_overflows_in_a_row_stop_the_run_instead_of_looping() {
 
 /// Crash run `a` at `fault`, recover, resume it as `b`. Returns b's worktree.
 fn crash_and_resume(env: &Env, fault: &str, extra: &[&str]) -> PathBuf {
+    crash(env, fault, extra);
+    let o = resume(env, extra).output().expect("run b");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    env.repo.join(".git/kitsu/worktrees/rb")
+}
+
+/// Run `a` killed at `fault`, then recovered.
+fn crash(env: &Env, fault: &str, extra: &[&str]) {
     let mut args = vec![
         "run",
         "bounded-retries",
@@ -608,6 +625,10 @@ fn crash_and_resume(env: &Env, fault: &str, extra: &[&str]) -> PathBuf {
         env.store().run("ra").expect("ra").state,
         RunState::Interrupted
     );
+}
+
+/// `kitsu run` resuming `ra` as `rb`.
+fn resume(env: &Env, extra: &[&str]) -> Command {
     let mut args = vec![
         "run",
         "bounded-retries",
@@ -621,9 +642,7 @@ fn crash_and_resume(env: &Env, fault: &str, extra: &[&str]) -> PathBuf {
         "-q",
     ];
     args.extend_from_slice(extra);
-    let o = env.cmd(&args).output().expect("run b");
-    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    env.repo.join(".git/kitsu/worktrees/rb")
+    env.cmd(&args)
 }
 
 fn begins(env: &Env, call: &str) -> usize {
@@ -914,6 +933,330 @@ fn paths_outside_the_worktree_are_refused_symlinks_included() {
     assert_eq!(ends[3]["outcome"], "invalid");
     assert!(!env.repo.join(".git/kitsu/worktrees/escape.txt").exists());
     assert!(!Path::new("/tmp/kitsu-escape.txt").exists());
+}
+
+/// Waits for `child`, answering every ask it raises with `answer`.
+/// Returns the asks, in order.
+fn answering(env: &Env, mut child: Child, answer: &str) -> Vec<Value> {
+    let t0 = std::time::Instant::now();
+    let mut asks = Vec::new();
+    loop {
+        for a in env.store().open_asks().expect("asks") {
+            env.ok(&["answer", &a.id.to_string(), answer]);
+            asks.push(a.request);
+        }
+        if let Some(status) = child.try_wait().expect("wait") {
+            assert!(status.success(), "the run failed");
+            return asks;
+        }
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(60),
+            "the run never ended"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn a_command_cut_off_by_a_crash_is_settled_before_anyone_is_asked_about_it() {
+    let script = json!([
+        { "tool": "shell", "args": { "command": "echo x >> log.txt" } },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "stopping" }, "expect": "it was not run again" },
+    ]);
+    let env = Env::new("crash-ask", &script, "");
+    crash(&env, "after_effect:shell", &["--policy", "auto"]);
+    // Resumed under ask, by a human who declines everything.
+    let child = resume(&env, &["--policy", "ask"]).spawn().expect("run b");
+    let asks = answering(&env, child, "reject_once");
+    assert!(
+        asks.is_empty(),
+        "asked about a command that won't run: {asks:#?}"
+    );
+    let wt = env.repo.join(".git/kitsu/worktrees/rb");
+    assert_eq!(
+        std::fs::read_to_string(wt.join("log.txt")).expect("log"),
+        "x\n"
+    );
+    let end = env
+        .events("rb")
+        .into_iter()
+        .find(|(k, b)| k == "tool.end" && b["call"] == "ra/c1")
+        .expect("settled");
+    assert_eq!(
+        (end.1["outcome"].as_str(), end.1["reconciled"].as_bool()),
+        (Some("unknown"), Some(true)),
+        "{:#}",
+        end.1
+    );
+}
+
+#[test]
+fn under_auto_a_git_push_still_waits_for_you() {
+    let script = json!([
+        { "tool": "shell", "args": { "command": "git push origin HEAD" } },
+        { "tool": "shell", "args": { "command": "git update-ref refs/heads/main HEAD" } },
+        { "tool": "shell", "args": { "command": "echo ok > ok.txt" } },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "probing" }, "expect": "A human declined" },
+    ]);
+    let env = Env::new("auto-screen", &script, "");
+    let child = env
+        .cmd(&[
+            "run",
+            "bounded-retries",
+            "--agent",
+            "kitsu",
+            "--id",
+            "rn32",
+            "-q",
+            "--policy",
+            "auto",
+        ])
+        .spawn()
+        .expect("spawn");
+    let asks = answering(&env, child, "reject_once");
+    let screened: Vec<&str> = asks
+        .iter()
+        .map(|a| a["judge"]["screened"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        screened,
+        [
+            "reaches a git remote or changes git's configuration",
+            "changes git refs other worktrees share"
+        ],
+        "{asks:#?}"
+    );
+    let ends: Vec<Value> = env
+        .events("rn32")
+        .into_iter()
+        .filter(|(k, _)| k == "tool.end")
+        .map(|(_, b)| b)
+        .collect();
+    assert_eq!(ends[0]["outcome"], "denied");
+    assert_eq!(ends[1]["outcome"], "denied");
+    assert_eq!(ends[2]["outcome"], "done", "the rest still runs on its own");
+    assert!(env.repo.join(".git/kitsu/worktrees/rn32/ok.txt").exists());
+}
+
+/// What the model got back for the last call before request `r`.
+fn last_tool_text(r: &Value) -> String {
+    r["body"]["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "tool")
+        .and_then(|m| m["content"].as_str())
+        .expect("a tool message")
+        .to_string()
+}
+
+#[test]
+fn shell_output_keeps_both_ends_of_both_streams() {
+    // The markers are built at run time, so only the output can hold them.
+    let cmd = r#"python3 -c "import sys; print('HEAD' + '-START'); print('x' * 120000); print('SUMMARY' + '-END'); sys.stderr.write('ERR' + '-START\n' + 'e' * 40000 + '\nERR' + '-END\n'); sys.exit(1)""#;
+    let script = json!([
+        { "tool": "shell", "args": { "command": cmd } },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "probing" } },
+    ]);
+    let env = Env::new("shell-ends", &script, "");
+    assert!(env.run("rn30", &["--policy", "auto"]).status.success());
+    let out = last_tool_text(&env.requests()[1]);
+    for m in [
+        "exit 1",
+        "HEAD-START",
+        "SUMMARY-END",
+        "ERR-START",
+        "ERR-END",
+        "bytes cut from the middle",
+    ] {
+        assert!(out.contains(m), "{m} is missing from:\n{}", tail(&out));
+    }
+    assert!(out.len() <= 24 * 1024, "{} bytes", out.len());
+}
+
+fn tail(s: &str) -> &str {
+    let mut i = s.len().saturating_sub(600);
+    while !s.is_char_boundary(i) {
+        i += 1;
+    }
+    &s[i..]
+}
+
+#[test]
+fn a_background_process_does_not_hold_the_call() {
+    let script = json!([
+        { "tool": "shell", "args": { "command": "(sleep 6; echo late > late.txt) & echo started", "timeout_secs": 60 } },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "probing" } },
+    ]);
+    let env = Env::new("shell-bg", &script, "");
+    assert!(env.run("rn31", &["--policy", "auto"]).status.success());
+    assert!(last_tool_text(&env.requests()[1]).contains("started"));
+    let at = |kind: &str| {
+        env.store()
+            .run_events("rn31", 0, 10_000)
+            .expect("events")
+            .into_iter()
+            .find(|e| e.kind == kind && e.body["call"] == "rn31/c1")
+            .expect("event")
+            .at
+    };
+    let (begin, end) = (at("tool.begin"), at("tool.end"));
+    assert!(end - begin < 4500, "the call took {} ms", end - begin);
+    // What it left running was stopped with it.
+    std::thread::sleep(std::time::Duration::from_millis(
+        (7500 - (end - begin)).max(0) as u64,
+    ));
+    assert!(!env.repo.join(".git/kitsu/worktrees/rn31/late.txt").exists());
+}
+
+#[test]
+fn a_command_that_times_out_keeps_what_it_printed() {
+    let script = json!([
+        { "tool": "shell", "args": { "command": "printf 'PART%s\\n' IAL; sleep 5", "timeout_secs": 1 } },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "probing" } },
+    ]);
+    let env = Env::new("shell-timeout", &script, "");
+    assert!(env.run("rn40", &["--policy", "auto"]).status.success());
+    let timed_out = last_tool_text(&env.requests()[1]);
+    assert!(
+        timed_out.contains("timed out after 1s") && timed_out.contains("PARTIAL"),
+        "{timed_out}"
+    );
+}
+
+#[test]
+fn a_reply_cut_off_at_the_output_limit_is_not_a_finish() {
+    // Text only, cut off: told so, not taken as done.
+    let script = json!([
+        { "text": "Here is the whole new file:", "finish": "length" },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "ok" }, "expect": "output limit" },
+    ]);
+    let env = Env::new("cut-text", &script, "");
+    assert!(env.run("rn33", &[]).status.success());
+    assert_eq!(
+        stop_reason(&env, "rn33"),
+        (RunState::Finished, Some("blocked".into()))
+    );
+    let ev = env.events("rn33");
+    assert!(
+        ev.iter()
+            .all(|(k, b)| !(k == "tool.end" && b["implicit"] == true)),
+        "{ev:#?}"
+    );
+    assert!(
+        ev.iter()
+            .any(|(k, b)| k == "loop.signal" && b["kind"] == "cut_off")
+    );
+
+    // A call cut off mid-arguments: nothing runs, and it says why.
+    let script = json!([
+        { "raw_tools": [{ "tool": "write_file", "arguments": "{\"path\":\"cut.txt\",\"content\":\"ab" }], "finish": "length" },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "ok" } },
+    ]);
+    let env = Env::new("cut-call", &script, "");
+    assert!(env.run("rn34", &[]).status.success());
+    let seen = last_tool_text(&env.requests()[1]);
+    assert!(seen.contains("output limit"), "{seen}");
+    assert!(!env.repo.join(".git/kitsu/worktrees/rn34/cut.txt").exists());
+
+    // Cut off again and again: stopped, not looped.
+    let cut = json!({ "text": "Here", "finish": "length" });
+    let env = Env::new(
+        "cut-thrice",
+        &json!([cut, cut, cut, { "text": "unreachable" }]),
+        "",
+    );
+    assert!(env.run("rn35", &[]).status.success());
+    assert_eq!(
+        stop_reason(&env, "rn35"),
+        (RunState::Finished, Some("output_limit".into()))
+    );
+    assert_eq!(env.requests().len(), 3);
+}
+
+#[test]
+fn an_empty_reply_is_retried_a_bounded_number_of_times() {
+    let script = json!([
+        { "empty": true },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "ok" } },
+    ]);
+    let env = Env::new("empty", &script, "");
+    assert!(env.run("rn36", &[]).status.success());
+    assert_eq!(
+        stop_reason(&env, "rn36"),
+        (RunState::Finished, Some("blocked".into()))
+    );
+    let errors: Vec<Value> = env
+        .events("rn36")
+        .into_iter()
+        .filter(|(k, _)| k == "model.error")
+        .map(|(_, b)| b)
+        .collect();
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(
+        errors[0]["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("empty reply")
+    );
+    // An empty reply never enters the conversation.
+    let msgs = env.requests()[1]["body"]["messages"].clone();
+    assert!(
+        msgs.as_array()
+            .expect("messages")
+            .iter()
+            .all(|m| m["role"] != "assistant"),
+        "{msgs:#}"
+    );
+
+    let empty = json!({ "empty": true });
+    let env = Env::new(
+        "empty5",
+        &json!([empty, empty, empty, empty, empty, { "text": "unreachable" }]),
+        "",
+    );
+    assert!(!env.run("rn37", &[]).status.success());
+    let r = env.store().run("rn37").expect("run");
+    assert_eq!(r.state, RunState::Failed);
+    assert!(
+        r.detail.as_deref().unwrap_or("").contains("empty reply"),
+        "{:?}",
+        r.detail
+    );
+    assert_eq!(env.requests().len(), 5);
+}
+
+#[test]
+fn a_reply_without_a_tool_call_is_nudged_once_before_it_counts_as_finish() {
+    let script = json!([
+        { "text": "Let me look at the code." },
+        { "tool": "finish", "args": { "outcome": "blocked", "summary": "ok" }, "expect": "call a tool" },
+    ]);
+    let env = Env::new("nudge", &script, "");
+    assert!(env.run("rn38", &[]).status.success());
+    assert_eq!(
+        stop_reason(&env, "rn38"),
+        (RunState::Finished, Some("blocked".into()))
+    );
+    assert!(
+        env.events("rn38")
+            .iter()
+            .any(|(k, b)| k == "loop.signal" && b["kind"] == "no_call" && b["turn"] == 1)
+    );
+
+    // Twice in a row: the second is the model saying it's done.
+    let env = Env::new(
+        "nudge2",
+        &json!([{ "text": "a" }, { "text": "b" }, { "text": "unreachable" }]),
+        "",
+    );
+    assert!(env.run("rn39", &[]).status.success());
+    assert_eq!(
+        stop_reason(&env, "rn39"),
+        (RunState::Finished, Some("unverified".into()))
+    );
+    assert_eq!(env.requests().len(), 2);
 }
 
 type Heard = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;

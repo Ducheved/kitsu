@@ -104,7 +104,7 @@ pub fn definitions() -> Value {
         ),
         tool(
             "shell",
-            "Run a shell command in your worktree (sh -c). Output is cut to its head and tail. Prefer the other tools for reading, searching and editing, and run_check for checks.",
+            "Run a shell command in your worktree (sh -c). Output is cut to the head and tail of stdout and of stderr. Processes it starts in the background are stopped when it exits. Prefer the other tools for reading, searching and editing, and run_check for checks.",
             json!({ "command": s("The command"), "timeout_secs": n("Seconds before it is killed; default 120, at most 600") }),
             &["command"]
         ),
@@ -299,7 +299,10 @@ pub fn apply_edit(text: &str, old: &str, new: &str, all: bool) -> Result<(String
     };
     let at: Vec<usize> = text.match_indices(&old).map(|(i, _)| i).collect();
     match at.len() {
-        0 => Err("`old` was not found. Read the file again: it changed, or the text differs (whitespace, indentation).".into()),
+        0 => Err(format!(
+            "`old` was not found. Read the file again: it changed, or the text differs (whitespace, indentation).{}",
+            nearest(text, &old)
+        )),
         n if n > 1 && !all => {
             let lines: Vec<String> = at
                 .iter()
@@ -311,6 +314,60 @@ pub fn apply_edit(text: &str, old: &str, new: &str, all: bool) -> Result<(String
             ))
         }
         n => Ok((text.replace(&old, &new), n)),
+    }
+}
+
+/// Where `old` would match if whitespace at the ends of lines didn't count,
+/// or where its first line is: a hint for the next call, never applied.
+fn nearest(text: &str, old: &str) -> String {
+    let file: Vec<&str> = text.lines().collect();
+    let want: Vec<&str> = old.lines().collect();
+    let at = |i: usize| {
+        (0..want.len()).all(|j| file.get(i + j).is_some_and(|f| f.trim() == want[j].trim()))
+    };
+    let hits: Vec<usize> = (0..file.len()).filter(|&i| at(i)).collect();
+    // The whitespace at the ends, made visible.
+    let show = |s: &str| {
+        let s = s.trim_end_matches('\r');
+        let (lead, rest) = s.split_at(s.len() - s.trim_start().len());
+        let (core, trail) = rest.split_at(rest.trim_end().len());
+        let v = |w: &str| w.replace(' ', "·").replace('\t', "→");
+        format!("{}{core}{}", v(lead), v(trail))
+    };
+    if let [i] = hits[..] {
+        let j = (0..want.len())
+            .find(|&j| file[i + j] != want[j])
+            .unwrap_or(0);
+        return format!(
+            " It matches lines {}-{} if whitespace at the ends of lines is ignored: line {} of the file has `{}`, you sent `{}` (· is a space, → a tab).",
+            i + 1,
+            i + want.len(),
+            i + j + 1,
+            show(file[i + j]),
+            show(want[j])
+        );
+    }
+    let first = want.iter().map(|w| w.trim()).find(|w| !w.is_empty());
+    let starts: Vec<usize> = (0..file.len())
+        .filter(|&i| Some(file[i].trim()) == first)
+        .collect();
+    let list = |v: &[usize]| {
+        v.iter()
+            .take(5)
+            .map(|i| (i + 1).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match (hits.len(), starts.is_empty()) {
+        (0, true) => String::new(),
+        (0, false) => format!(
+            " Its first line is at line {} (whitespace aside); what follows it differs.",
+            list(&starts)
+        ),
+        (n, _) => format!(
+            " Ignoring whitespace at the ends of lines it matches {n} places, starting at lines {}.",
+            list(&hits)
+        ),
     }
 }
 
@@ -443,6 +500,21 @@ mod tests {
             "c\r\nd\r\n"
         );
         assert_eq!(first_changed_line("a\nb\nc", "a\nB\nc"), 2);
+    }
+
+    #[test]
+    fn a_miss_says_where_the_nearest_text_is_and_never_applies_it() {
+        let t = "def f():\n    if x:\n        return 1\n    return 2\n";
+        // Wrong indentation: found when whitespace is ignored, shown, not applied.
+        let e = apply_edit(t, "  if x:\n      return 1", "y", false).expect_err("a miss");
+        assert!(e.contains("lines 2-3"), "{e}");
+        assert!(e.contains("file has `····if x:`"), "{e}");
+        // Only the first line is there.
+        let e = apply_edit(t, "if x:\n    return 9", "y", false).expect_err("a miss");
+        assert!(e.contains("first line") && e.contains("line 2"), "{e}");
+        // Nothing like it.
+        let e = apply_edit(t, "nowhere", "y", false).expect_err("a miss");
+        assert!(e.contains("not found") && !e.contains("line"), "{e}");
     }
 
     #[test]
