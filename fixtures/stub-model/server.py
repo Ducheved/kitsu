@@ -198,7 +198,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"data": [], "has_more": False})
 
     def log(self, path, role, body):
-        with LOCK, open(self.args.log, "a") as f:
+        with LOCK, open(self.args.log, "a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps({"at": time.time(), "path": path, "role": role, "body": body}) + "\n")
 
     def openai(self, path, body):
@@ -444,14 +444,14 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["seen"] = STATE.get("seen", 0) + 1
                 overflow = STATE["seen"] == self.args.overflow_at
             if overflow:
-                with LOCK, open(self.args.log, "a") as f:
+                with LOCK, open(self.args.log, "a", encoding="utf-8", newline="\n") as f:
                     f.write(json.dumps({"at": time.time(), "path": path, "role": "overflow", "body": body}) + "\n")
                 self._json(400, {"type": "error", "error": {"type": "invalid_request_error",
                                                              "message": "prompt is too long: 210000 tokens > 200000 maximum"}})
                 return
         kind, *rest = plan(body, self.args)
         role = rest[-1]
-        with LOCK, open(self.args.log, "a") as f:
+        with LOCK, open(self.args.log, "a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps({"at": time.time(), "path": path, "role": role, "body": body}) + "\n")
         model = body.get("model", "stub")
         usage_in = self.args.fill if role == "work" else 2000
@@ -503,7 +503,7 @@ def main():
     args = p.parse_args()
     global SCRIPT
     if args.script:
-        with open(args.script) as f:
+        with open(args.script, encoding="utf-8") as f:
             SCRIPT = json.load(f)
     Handler.args = args
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
