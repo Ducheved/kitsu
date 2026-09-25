@@ -39,6 +39,16 @@
   const status = $derived(view?.status);
   const statusRun = $derived(status && "run" in status ? detail?.runs.find((r) => r.id === status.run) : undefined);
   const asks = $derived<Ask[]>(status?.kind === "asking" ? (app.overview?.asks ?? []).filter((a) => a.run === status.run) : []);
+  // A run that finishes while you're watching gets a perked-up fox on its
+  // review card; one that was already waiting when you opened the task doesn't.
+  let lastKind: string | undefined;
+  let justFinished = $state(false);
+  $effect(() => {
+    const kind = status?.kind;
+    if (lastKind === "running" && kind === "review") justFinished = true;
+    else if (kind !== "review") justFinished = false;
+    lastKind = kind;
+  });
   const history = $derived((detail?.runs ?? []).filter((r) => r.id !== statusRun?.id));
   const constraints = $derived((detail?.brief.included ?? []).filter((i) => i.kind !== "task"));
   const agents = $derived(app.overview?.agents ?? []);
@@ -165,7 +175,7 @@
         {#each detail.questions.filter((q) => q.open) as q (q.id)}
           <div class="card open-q"><span class="pill warn">{t("question.open")}</span> {q.title} <span class="hint">{t("question.openReview")}</span></div>
         {/each}
-        <ReviewCard bind:this={reviewCard} run={statusRun} taskId={id} />
+        <ReviewCard bind:this={reviewCard} run={statusRun} taskId={id} fresh={justFinished} />
       {:else if (status?.kind === "failed" || status?.kind === "interrupted") && statusRun}
         <div class="card">
           <div class="card-head">

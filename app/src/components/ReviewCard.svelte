@@ -4,9 +4,10 @@
   import { t } from "../lib/i18n/index.svelte";
   import { checkWord, spent, tokenParams } from "../lib/status";
   import type { Accepted, Review, Run } from "../lib/types";
+  import Fox from "./Fox.svelte";
   import RunActivity from "./RunActivity.svelte";
 
-  let { run, taskId }: { run: Run; taskId: string } = $props();
+  let { run, taskId, fresh = false }: { run: Run; taskId: string; fresh?: boolean } = $props();
 
   let review = $state<Review | null>(null);
   let error = $state<string | null>(null);
@@ -92,7 +93,9 @@
 
 <div class="card review" data-tour="review">
   <div class="head">
-    <div>
+    <!-- Takes over from the working fox when the run finishes in front of you. -->
+    {#if fresh}<Fox state="perk" size={32} />{/if}
+    <div class="summary">
       <div class="title">
         {t(run.stop_reason === "cancelled" ? "review.stopped" : "review.finished", { agent: run.agent })}
         {#if review}<span class="hint">· {t("review.files", { n: review.files.length })} · <span class="tone-ok">+{total[0]}</span> <span class="tone-bad">−{total[1]}</span> · <span class="mono">{t("review.onto", { branch: review.target })}</span>{#if spent(run.usage) != null}{" · "}{t("review.tokens", tokenParams(spent(run.usage)!))}{/if}</span>{/if}
@@ -193,6 +196,10 @@
     justify-content: space-between;
     align-items: flex-start;
     gap: var(--s3);
+  }
+  .summary {
+    flex: 1;
+    min-width: 0;
   }
   .title {
     font-weight: 600;

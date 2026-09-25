@@ -2,6 +2,7 @@
   import { app } from "../lib/app.svelte";
   import { buffers } from "../lib/buffers.svelte";
   import { LOCALES, i18n, t } from "../lib/i18n/index.svelte";
+  import FoxTrot from "./FoxTrot.svelte";
 
   const ov = $derived(app.overview);
   const needs = $derived((ov?.tasks ?? []).filter((x) => x.attention === "needs_you").length);
@@ -18,7 +19,7 @@
   {#if needs}
     <button class="item tone-warn" onclick={() => app.setMode("work")}>● {t("sb.needsYou", { n: needs })}</button>
   {/if}
-  {#if running}<span class="item tone-work">◌ {t("sb.running", { n: running })}</span>{/if}
+  {#if running}<span class="item tone-work running">◌ {t("sb.running", { n: running })}<FoxTrot size={11} /></span>{/if}
   <span class="spacer"></span>
   {#if app.mode === "code" && buffers.current}<span class="item mono">{buffers.current.path}</span>{/if}
   {#if app.prefs.vim}<span class="item mono">VIM</span>{/if}
@@ -75,6 +76,11 @@
   }
   .mono {
     font-size: 11.5px;
+  }
+  .running {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
   .spacer {
     flex: 1;
