@@ -1,0 +1,7 @@
+# VAT rates, maintained by finance. Signed off 2026-07-01 (M. Weber, finance). Changes go through finance only.
+country,rate
+DE,0.19
+FR,0.20
+NL,0.21
+AT,0.20
+NO,0.25

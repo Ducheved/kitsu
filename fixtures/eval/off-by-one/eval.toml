@@ -1,0 +1,8 @@
+task = "off-by-one"
+kind = "bug fix with a failing test"
+expect = "done"
+
+[dryrun]
+# What the scripted agents claim when they play each variant in dryrun/.
+good = "done"
+bad = "done"

@@ -1,0 +1,9 @@
+[checks.durations]
+run = "python3 -m unittest -q test_durations"
+timeout = "1m"
+scope = ["durations.py", "config.py", "test_durations.py"]
+guards = ["durations.py", "config.py"]
+why = "A duration that parses to the wrong number of seconds is a timeout nobody notices until an outage: anything outside the format must be an error."
+
+[protect]
+paths = ["test_*.py"]

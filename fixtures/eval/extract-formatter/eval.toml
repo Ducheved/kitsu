@@ -1,0 +1,8 @@
+task = "extract-formatter"
+kind = "refactor that must keep behaviour"
+expect = "done"
+restore = ["test_report.py", "check_structure.py"]
+
+[dryrun]
+good = "done"
+bad = "done"

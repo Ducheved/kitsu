@@ -1,0 +1,9 @@
+[checks.pager]
+run = "python3 -m unittest -q test_pager"
+timeout = "1m"
+scope = ["pager.py", "test_pager.py"]
+guards = ["pager.py"]
+why = "Pages are numbered from 1 and the last, partial page is shown: the admin list must never hide rows."
+
+[protect]
+paths = ["test_*.py"]

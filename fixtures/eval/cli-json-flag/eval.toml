@@ -1,0 +1,7 @@
+task = "cli-json-flag"
+kind = "feature on an existing CLI"
+expect = "done"
+
+[dryrun]
+good = "done"
+bad = "done"

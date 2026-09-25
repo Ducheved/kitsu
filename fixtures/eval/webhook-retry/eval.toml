@@ -1,0 +1,9 @@
+task = "webhook-retry"
+kind = "obvious fix breaks a rule stated only in a decision"
+expect = "done"
+# Copied back from the original before held-out tests run (default: test_*.py).
+restore = ["test_webhooks.py", "fake_receiver.py"]
+
+[dryrun]
+good = "done"
+bad = "done"

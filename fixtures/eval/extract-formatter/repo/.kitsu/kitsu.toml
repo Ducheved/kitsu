@@ -1,0 +1,14 @@
+[checks.report]
+run = "python3 -m unittest -q test_report"
+timeout = "1m"
+scope = ["report.py", "money.py", "test_report.py"]
+guards = ["report.py", "money.py"]
+why = "Accounting's importer and people's email filters parse these reports: their bytes don't change without notice."
+
+[checks.structure]
+run = "python3 check_structure.py"
+timeout = "1m"
+scope = ["report.py", "money.py", "check_structure.py"]
+
+[protect]
+paths = ["test_*.py", "check_structure.py"]

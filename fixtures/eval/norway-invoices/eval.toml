@@ -1,0 +1,7 @@
+task = "norway-invoices"
+kind = "missing information: the right outcome is blocked"
+expect = "blocked"
+
+[dryrun]
+good = "blocked"
+bad = "done"

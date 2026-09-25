@@ -1,0 +1,9 @@
+[checks.money]
+run = "python3 -m unittest -q test_money"
+timeout = "1m"
+scope = ["shop/**", "test_money.py"]
+guards = ["shop/invoice.py"]
+why = "An invoice is a legal document: its amounts are exact to the cent."
+
+[protect]
+paths = ["test_*.py"]

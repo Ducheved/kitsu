@@ -1,0 +1,7 @@
+task = "stale-cache"
+kind = "bug fix against a documented contract"
+expect = "done"
+
+[dryrun]
+good = "done"
+bad = "done"

@@ -1,0 +1,9 @@
+[checks.cli]
+run = "python3 -m unittest -q test_cli"
+timeout = "1m"
+scope = ["todo.py", "test_cli.py"]
+guards = ["todo.py"]
+why = "Scripts and the menu-bar widget call todo.py: its output and exit codes are an interface."
+
+[protect]
+paths = ["test_*.py"]

@@ -1,0 +1,7 @@
+task = "cent-short"
+kind = "the same bug in several files: needs a search"
+expect = "done"
+
+[dryrun]
+good = "done"
+bad = "done"

@@ -20,8 +20,13 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Agent worktrees made by Claude Code sessions.
+# Agent worktrees made by local tooling.
 .claude/worktrees/
 
 # Release staging from .github/scripts/package.sh
 /dist/
+
+# Output of fixtures/eval/run.py (its default --out), and Python's caches
+# from the fixtures.
+/results/
+__pycache__/

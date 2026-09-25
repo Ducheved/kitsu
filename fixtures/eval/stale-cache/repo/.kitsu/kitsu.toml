@@ -1,0 +1,9 @@
+[checks.cache]
+run = "python3 -m unittest -q test_cache"
+timeout = "1m"
+scope = ["cache.py", "prices.py", "test_cache.py"]
+guards = ["cache.py"]
+why = "A cached price older than its TTL is a wrong price on the checkout page."
+
+[protect]
+paths = ["test_*.py"]
