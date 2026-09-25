@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "include-v-in-tag": true,
+  "include-component-in-tag": false,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": true,
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "package-name": "kitsu",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        { "type": "toml", "path": "crates/kitsu/Cargo.toml", "jsonpath": "$.package.version" },
+        { "type": "toml", "path": "app/src-tauri/Cargo.toml", "jsonpath": "$.package.version" },
+        { "type": "json", "path": "app/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "app/package-lock.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "app/package-lock.json", "jsonpath": "$.packages[''].version" },
+        { "type": "json", "path": "app/src-tauri/tauri.conf.json", "jsonpath": "$.version" }
+      ]
+    }
+  }
+}

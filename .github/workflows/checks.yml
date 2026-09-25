@@ -1,0 +1,71 @@
+# The repository's checks: the same ones `kitsu check` runs from
+# .kitsu/kitsu.toml, plus the stress budget and the version sync. Called by
+# ci.yml on every push and pull request and by release.yml before a
+# release is built.
+name: checks
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to check; empty means the triggering commit
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: System libraries for the Tauri app
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      # rust-toolchain.toml pins the version.
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: One version everywhere
+        run: .github/scripts/check-versions.sh
+      # The app crate embeds app/dist at build time.
+      - run: mkdir -p app/dist && echo '<!doctype html>' > app/dist/index.html
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: cargo run -q --locked -p kitsu --bin kitsu -- arch check
+      - name: Stress budget (100 concurrent runs)
+        run: |
+          cargo build --release --locked -p kitsu --bins --example scale
+          ./target/release/examples/scale stress 100
+
+  ui:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build

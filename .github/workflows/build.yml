@@ -1,0 +1,205 @@
+# Desktop installers and CLI archives for every platform, uploaded as
+# workflow artifacts. Called by ci.yml (dev builds) and release.yml (a
+# tagged release). See docs/releasing.md.
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build; empty means the triggering commit
+        type: string
+        default: ""
+      release:
+        description: Require the ref to be the release tag v<Cargo version>
+        type: boolean
+        default: false
+      retention-days:
+        description: How long the artifacts are kept
+        type: number
+        default: 7
+    secrets:
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_SIGNING_IDENTITY:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      APPLE_API_KEY:
+        required: false
+      APPLE_API_ISSUER:
+        required: false
+      APPLE_API_KEY_P8:
+        required: false
+      WINDOWS_CERTIFICATE:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
+    outputs:
+      version:
+        description: The version the build carries, e.g. 0.2.1-dev.14+g1a2b3c4
+        value: ${{ jobs.version.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: version
+        run: .github/scripts/version.sh
+      - name: A release build must be the release tag
+        if: inputs.release && steps.version.outputs.release != 'true'
+        run: |
+          echo "::error::HEAD is not tagged v$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/kitsu/Cargo.toml | head -n 1); refusing to build a release from it"
+          exit 1
+
+  bundle:
+    needs: version
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04: the oldest glibc and webkit2gtk-4.1 still hosted, so the
+          # .deb, .rpm and AppImage run on as many distributions as possible.
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            rust-targets: x86_64-unknown-linux-gnu
+            bundles: deb,rpm,appimage
+          # Pinned: Tauri's MSI bundler runs WiX 3, which needs the VBScript
+          # feature. Move to a newer image after one green run on it.
+          - name: windows-x86_64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            rust-targets: x86_64-pc-windows-msvc
+            bundles: msi,nsis
+          # One universal .app/.dmg for Apple Silicon and Intel; the CLI
+          # ships per architecture.
+          - name: macos-universal
+            os: macos-15
+            target: universal-apple-darwin
+            rust-targets: aarch64-apple-darwin x86_64-apple-darwin
+            bundles: app,dmg
+    env:
+      # Read by crates/kitsu/build.rs; `kitsu --version` prints it.
+      KITSU_BUILD_VERSION: ${{ needs.version.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: System libraries for the Tauri app
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils file
+
+      - name: Rust toolchain
+        env:
+          RUST_TARGETS: ${{ matrix.rust-targets }}
+        run: |
+          rustup toolchain install
+          # shellcheck disable=SC2086 # a space-separated list on purpose
+          rustup target add $RUST_TARGETS
+          rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+
+      - name: macOS signing (only with the secrets)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: .github/scripts/signing-macos.sh
+      - name: Windows signing (only with the secrets)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: .github/scripts/signing-windows.ps1
+
+      # Builds the frontend (beforeBuildCommand) and the installers. Their
+      # version is the plain Cargo/tauri.conf.json one: MSI allows only
+      # numeric versions, so dev metadata stays out of the bundles.
+      - name: Desktop app
+        working-directory: app
+        env:
+          TARGET: ${{ matrix.target }}
+          BUNDLES: ${{ matrix.bundles }}
+        run: |
+          args=(build --ci --target "$TARGET" --bundles "$BUNDLES")
+          if [[ -n "${TAURI_EXTRA_CONFIG:-}" ]]; then
+            args+=(--config "$TAURI_EXTRA_CONFIG")
+          fi
+          npm run tauri -- "${args[@]}" -- --locked
+      - name: Collect installers
+        env:
+          TARGET: ${{ matrix.target }}
+        run: .github/scripts/package.sh app "$TARGET"
+
+      - name: CLI
+        env:
+          RUST_TARGETS: ${{ matrix.rust-targets }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          for t in $RUST_TARGETS; do
+            cargo build --release --locked -p kitsu --bins --target "$t"
+            .github/scripts/package.sh cli "$t" "$VERSION"
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kitsu-app-${{ needs.version.outputs.version }}-${{ matrix.name }}
+          path: dist/app/*
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+          compression-level: 0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kitsu-cli-${{ needs.version.outputs.version }}-${{ matrix.name }}
+          path: dist/cli/*
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+          compression-level: 0

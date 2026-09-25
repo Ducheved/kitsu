@@ -22,3 +22,6 @@ target
 
 # Agent worktrees made by Claude Code sessions.
 .claude/worktrees/
+
+# Release staging from .github/scripts/package.sh
+/dist/

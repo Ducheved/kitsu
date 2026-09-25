@@ -1,0 +1,32 @@
+# Versions and CHANGELOG.md are computed from commit messages
+# (docs/releasing.md), so a pull request's title and every commit it adds
+# must follow Conventional Commits 1.0.0. The title matters for squash
+# merges, the commits for merge and rebase merges; both are checked.
+name: conventional commits
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conventional-commits-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Title and commits
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: .github/scripts/conventional.sh "$BASE" "$HEAD"

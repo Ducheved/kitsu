@@ -25,7 +25,7 @@ use crate::util::{ago, now_ms, slugify};
 use crate::workspace::{Instance, Liveness, Workspace};
 
 #[derive(Parser)]
-#[command(name = "kitsu", version, about = "Tasks, checks and evidence for humans and coding agents.", long_about = None)]
+#[command(name = "kitsu", version = env!("KITSU_VERSION"), about = "Tasks, checks and evidence for humans and coding agents.", long_about = None)]
 struct Cli {
     /// Print machine-readable JSON instead of text.
     #[arg(long, global = true)]
