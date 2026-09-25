@@ -10,7 +10,7 @@
 //! but marked unbound, because it describes neither tree.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -43,12 +43,21 @@ impl CheckRun<'_> {
         let tree = git.worktree_tree(&scratch)?;
         let started_at = now_ms();
         let t0 = Instant::now();
-        let result = run_command(
-            &check.run,
-            self.dir,
-            Duration::from_secs(check.timeout_secs),
-            check,
-        );
+        let held = check.held_out.then(|| held_out_dir(self.ws, &check.name));
+        let result = match &held {
+            Some(d) if !d.is_dir() => Err(Error::NotFound(format!(
+                "the files of held-out check `{}` at {} (set KITSU_HELD_OUT_DIR, or put them there)",
+                check.name,
+                d.display()
+            ))),
+            _ => run_command(
+                &check.run,
+                self.dir,
+                Duration::from_secs(check.timeout_secs),
+                check,
+                held.as_deref(),
+            ),
+        };
         let duration_ms = t0.elapsed().as_millis() as i64;
         let tree_after = git.worktree_tree(&scratch)?;
         let (outcome, exit_code, log) = match result {
@@ -102,8 +111,34 @@ fn shell(run: &str) -> Command {
     }
 }
 
-fn run_command(run: &str, dir: &Path, timeout: Duration, check: &CheckDef) -> Result<Ran> {
+/// Where a held-out check's files are: `$KITSU_HELD_OUT_DIR/<check>`, else
+/// `<config dir>/held-out/<name of your checkout's folder>/<check>`. Outside
+/// every worktree, so they're never in a snapshot, a diff or a brief. Not
+/// secret: an agent running as you can read your config dir.
+pub fn held_out_dir(ws: &Workspace, check: &str) -> PathBuf {
+    let root = match std::env::var_os("KITSU_HELD_OUT_DIR") {
+        Some(d) => PathBuf::from(d),
+        None => crate::workspace::config_dir().join("held-out").join(
+            ws.root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ),
+    };
+    root.join(check)
+}
+
+fn run_command(
+    run: &str,
+    dir: &Path,
+    timeout: Duration,
+    check: &CheckDef,
+    held_out: Option<&Path>,
+) -> Result<Ran> {
     let mut cmd = shell(run);
+    if let Some(d) = held_out {
+        cmd.env("KITSU_HELD_OUT", d);
+    }
     cmd.current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -346,6 +381,7 @@ mod tests {
             scope: Scope::new(scope.iter().copied()),
             guards: Scope::default(),
             why: None,
+            held_out: false,
         }
     }
 
@@ -444,6 +480,34 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_held_out_check_without_its_files_is_an_error_not_a_pass() {
+        let repo = TempRepo::new(&[("a.txt", "a")]);
+        let ws = Workspace::discover(&repo.root).expect("ws");
+        let store = ws.open_store().expect("store");
+        let cr = CheckRun {
+            ws: &ws,
+            store: &store,
+            dir: &repo.root,
+            run: None,
+        };
+        let mut c = check("true", &[]);
+        c.held_out = true;
+        let e = cr.execute(&c).expect("ran");
+        assert_eq!(e.outcome, CheckOutcome::Error);
+        let log = ws
+            .blobs()
+            .get(e.log.as_deref().expect("log"))
+            .expect("blob");
+        assert!(String::from_utf8_lossy(&log).contains("held-out check `c`"));
+        assert!(held_out_dir(&ws, "c").ends_with("c"));
+        assert!(!held_out_dir(&ws, "c").starts_with(&repo.root));
+        assert_eq!(
+            c.shown_command(),
+            "(held out: its tests are not in this repository)"
+        );
     }
 
     #[test]
