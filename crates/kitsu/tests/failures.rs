@@ -1002,9 +1002,11 @@ fn a_module_outside_the_architecture_model_fails_its_check() {
     }
     let config = env.repo.join(".kitsu/kitsu.toml");
     let mut toml = std::fs::read_to_string(&config).expect("config");
-    // Required for every change to a module or to the model.
+    // Required for every change to a module or to the model. The binary's
+    // path goes into TOML and then to sh: `C:\...` is neither's escapes.
+    let kitsu = KITSU.replace('\\', "/");
     toml.push_str(&format!(
-        "\n[architecture]\ncover = [\"*.py\"]\n\n[checks.architecture]\nrun = \"{KITSU} arch check\"\ntimeout = \"1m\"\nguards = [\"*.py\", \".kitsu/architecture/**\"]\n"
+        "\n[architecture]\ncover = [\"*.py\"]\n\n[checks.architecture]\nrun = \"'{kitsu}' arch check\"\ntimeout = \"1m\"\nguards = [\"*.py\", \".kitsu/architecture/**\"]\n"
     ));
     std::fs::write(&config, toml).expect("config");
     git(&env.repo, &["add", "-A"]);
